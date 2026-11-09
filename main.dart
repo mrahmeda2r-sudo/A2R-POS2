@@ -8103,7 +8103,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف'),
               )
             : FilledButton.icon(
-                onPressed: () => start(count: true),
+                onPressed: () {
+                  for (final r in results) {
+                    if (r.count == 0 && r.verdict == 0) {
+                      r.count = -1;
+                      r.cntNotes.clear();
+                    }
+                  }
+                  start(count: true);
+                },
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('فحص وتسمية وعد'),
               ),
