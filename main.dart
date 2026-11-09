@@ -4298,7 +4298,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
-    final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
     final extra = StringBuffer();
     if (item.reprintSummary) {
       extra.write('\n🚨 تحذير شديد: الإيصال ده REPRINT أو SUMMARY (ممكن يكون مكرر)!');
@@ -4320,7 +4319,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : item.userExcluded
             ? '\n🚫 مستبعد (مكرر)'
             : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$dup$unu$extra';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup$unu$extra';
   }
 
   String warningsText() {
@@ -4356,9 +4355,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
-        final txnStr = r.txn != null ? ' | معاملات: ${r.txn}' : '';
         sb.writeln('$mark ${baseName(r.path)}  ${r.unitName ?? '??'}  '
-            '${r.amount.toStringAsFixed(2)}$txnStr$extra');
+            '${r.amount.toStringAsFixed(2)}$extra');
       }
       sb.writeln(line);
       sb.writeln('الإجمالي العام: ${total.toStringAsFixed(2)} ج.م');
@@ -4587,10 +4585,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
           double? alt;
+          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           bool hasBatchClosed = RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res.text.toUpperCase());
           bool hasReprint = RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res.text.toUpperCase());
-
-          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
           if (needSecond) {
             try {
@@ -8093,29 +8090,17 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       ),
       bottomNavigationBar: _bottomBar(
         busy
-            ? OutlinedButton.icon(
+            ? FilledButton.icon(
                 onPressed: stopReq ? null : () => setState(() => stopReq = true),
+                style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
                 icon: const Icon(Icons.stop),
-                label: const Text('إيقاف'),
+                label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف'),
               )
-            : Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => start(),
-                      icon: const Icon(Icons.drive_file_rename_outline),
-                      label: const Text('فحص وتسمية'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: pendCount > 0 ? () => start(resumeOnly: true, count: true) : null,
-                      icon: const Icon(Icons.play_arrow),
-                      label: Text(pendCount > 0 ? 'بدء العد ($pendCount)' : 'بدء العد'),
-                    ),
-                  ),
-                ],
+            : FilledButton.icon(
+                onPressed: () => start(count: true),
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('فحص وتسمية وعد'),
               ),
         busy: busy,
         progress: progressValue,
