@@ -3601,6 +3601,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // سحب إيصال المراجعة: صح ✓ / غلط ✗ (غلط = استبعاد لو مكرر، وإلا بيفتح التصحيح)
   Widget _swipeWrap(ReceiptItem item, Widget card) {
+    if (item.ignoredDoc || item.userExcluded || !item.needsReview) return card;
     final okLabel = item.dupSuspect
         ? _l(context, 'احتسبه باتش ✓', 'Count it ✓')
         : (item.dateOdd ? _l(context, 'سيب تاريخه ✓', 'Keep date ✓') : _l(context, 'صح ✓', 'OK ✓'));
@@ -4300,7 +4301,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
-    final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
     final extra = StringBuffer();
     if (item.reprintSummary) {
       extra.write('\n🚨 تحذير شديد: الإيصال ده REPRINT أو SUMMARY (ممكن يكون مكرر)!');
@@ -4320,8 +4320,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final dup = item.dupSuspect
         ? '\n⚠️ مشكوك إنه مكرر (نفس مبلغ ماكينة ${item.dupOf ?? ''}) - مش محسوب لحد ما تراجعه'
         : item.userExcluded
-            ? '\n🚫 مستبعد (مكرر)'
+            ? '\n🚫 مستبعد يدويًا'
             : '';
+    final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
     return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$dup$unu$extra';
   }
 
@@ -4591,8 +4592,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           double? alt;
           bool hasBatchClosed = RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res.text.toUpperCase());
           bool hasReprint = RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res.text.toUpperCase());
-
-          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
+          // القراءة التانية عند عدم وضوح البيانات أو غياب علامة الإقفال أو ظهور إعادة طباعة
           final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
           if (needSecond) {
             try {
@@ -5129,18 +5129,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
             _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
+              color: item.reprintSummary ? _tintBg(context, Colors.red, soft: true) : null,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
                 side: BorderSide(
-                  color: item.reprintSummary 
-                      ? Colors.red 
-                      : (item.missingBatchClosed ? Colors.orange : _unitColor(item.row)), 
-                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.5)
+                  color: item.reprintSummary
+                      ? Colors.red
+                      : (item.missingBatchClosed ? Colors.orange : _unitColor(item.row)),
+                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.5),
                 ),
               ),
-              color: item.reprintSummary ? _tintBg(context, Colors.red, soft: true) : null,
               child: ListTile(
-                onTap: () => editReceipt(item),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ReceiptZoomPage(
+                      path: item.path,
+                      title: 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? ''}',
+                    ),
+                  ),
+                ),
                 leading: Image.file(
                   File(item.path),
                   width: 48,
@@ -5898,19 +5906,16 @@ List<int> _makeStrips(String src, String prefix) {
   final im = img.decodeImage(File(src).readAsBytesSync());
   if (im == null) return [];
   final w = im.width, h = im.height;
-  // التحسين الأقصى للسرعة والدقة: 4 شرائح عريضة بدلاً من 5 أو 6.
-  const n = 4;
-  final sw = w * 0.40; // 40% من العرض
-  final step = (w - sw) / (n - 1); // مسافة التحرك
+  const n = 5;
+  final cw = w / n;
   final out = <int>[w, h];
-  
   for (var i = 0; i < n; i++) {
-    final x0 = (i * step).round();
-    final x1 = math.min(w, (x0 + sw).round());
+    final x0 = math.max(0, (i * cw - cw * 0.12).round());
+    final x1 = math.min(w, ((i + 1) * cw + cw * 0.12).round());
     var c = img.copyCrop(im, x: x0, y: 0, width: x1 - x0, height: h);
     c = img.copyResize(c,
         width: (c.width * _stripScale).round(), interpolation: img.Interpolation.linear);
-    File('${prefix}_$i.jpg').writeAsBytesSync(img.encodeJpg(c, quality: 90));
+    File('${prefix}_$i.jpg').writeAsBytesSync(img.encodeJpg(c, quality: 92));
     out.add(x0);
   }
   return out;
@@ -6689,26 +6694,6 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 ),
               ),
           ]),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                _mini(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf, filled: true),
-                _mini(Icons.check, _l(context, 'صح ✓', 'OK ✓'), !can ? null : () { widget.onVerdict(1); setState(() {}); }),
-                _mini(Icons.close, _l(context, 'غلط ✗', 'Wrong ✗'), !can ? null : () { widget.onVerdict(-1); setState(() {}); }),
-                if (r.verdict != 0)
-                  _mini(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'), !can ? null : () { widget.onVerdict(0); setState(() {}); }),
-                _mini(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
-                  widget.onRecount();
-                  setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
-                }),
-              ],
-            ),
-          ),
           section(_l(context, 'الملاحظات', 'Notes'), [
             if (kinds.isEmpty)
               Container(
@@ -6765,6 +6750,41 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 );
               }),
           ]),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _mini(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf, filled: true),
+              _mini(Icons.check, _l(context, 'صح ✓', 'OK ✓'), !can
+                  ? null
+                  : () {
+                      widget.onVerdict(1);
+                      setState(() {});
+                    }),
+              _mini(Icons.close, _l(context, 'غلط ✗', 'Wrong ✗'), !can
+                  ? null
+                  : () {
+                      widget.onVerdict(-1);
+                      setState(() {});
+                    }),
+              if (r.verdict != 0)
+                _mini(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'), !can
+                    ? null
+                    : () {
+                        widget.onVerdict(0);
+                        setState(() {});
+                      }),
+              _mini(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can
+                  ? null
+                  : () {
+                      widget.onRecount();
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".',
+                              'Marked for counting. Go back and tap "Start counting".'))));
+                    }),
+            ],
+          ),
           const SizedBox(height: 16),
         ],
       ),
@@ -7360,7 +7380,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
-    Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths}) async {
+  Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths}) async {
     await prepareDefaultFiles();
     setState(() {
       busy = true;
@@ -7372,8 +7392,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       Directory(destDir).createSync(recursive: true);
       Directory(tmpDir).createSync(recursive: true);
     } catch (_) {}
-    
-    var rec = TextRecognizer(script: TextRecognitionScript.latin);
+    final rec = TextRecognizer(script: TextRecognitionScript.latin);
     String? idle;
     try {
       // المرحلة 1 (سريعة): تعريف الوحدة وتسمية كل الملفات
@@ -7386,13 +7405,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!resumeOnly) idle = await _identifyAll(rec, manualPaths: manualPaths);
       _dbg('PHASE1 done');
       if (mounted) setState(() => namingDone = true);
-      
-      await rec.close();
-      
-      // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف
+      // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف: مش بتشتغل غير لما تضغط "بدء العد"
       if (count) {
         _dbg('PHASE2 start');
-        rec = TextRecognizer(script: TextRecognitionScript.latin);
         await _countAll(rec);
         _dbg('PHASE2 done');
       }
@@ -7805,7 +7820,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       try {
         fp.deleteSync();
       } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 2));
+      await Future.delayed(const Duration(milliseconds: 30));
     }
     _dbg('FAST ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
     if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
@@ -7900,7 +7915,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         if (!_pageEnd(e) || pg == 1) rethrow;
       }
       if (!got) break;
-      await Future.delayed(const Duration(milliseconds: 5));
+      await Future.delayed(const Duration(milliseconds: 40));
     }
     _dbg('PAGES ${r.pdfName}: $nPages صفحة، المجموع ${swAll.elapsedMilliseconds ~/ 1000}ث '
         '(raster+png ${tRaster ~/ 1000}ث، شرائح ${_tmStrips ~/ 1000}ث، OCR ${_tmOcr ~/ 1000}ث)');
@@ -8093,18 +8108,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 icon: const Icon(Icons.stop),
                 label: const Text('إيقاف'),
               )
-            : FilledButton.icon(
-                onPressed: () {
-                  for (final r in results) {
-                    if (r.count <= 0 && r.verdict == 0) {
-                      r.count = -1;
-                      r.cntNotes.clear();
-                    }
-                  }
-                  start(count: true);
-                },
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('فحص وتسمية وعد'),
+            : Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => start(),
+                      icon: const Icon(Icons.drive_file_rename_outline),
+                      label: const Text('فحص وتسمية'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: pendCount > 0 ? () => start(resumeOnly: true, count: true) : null,
+                      icon: const Icon(Icons.play_arrow),
+                      label: Text(pendCount > 0 ? 'بدء العد ($pendCount)' : 'بدء العد'),
+                    ),
+                  ),
+                ],
               ),
         busy: busy,
         progress: progressValue,
