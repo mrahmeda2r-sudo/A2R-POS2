@@ -3559,9 +3559,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         it.ok = true;
         it.alt = null;
         it.unusual = null;
+        it.userExcluded = false;
+        it.ignoredDoc = false;
         if (it.how != 'extra-batch') it.how = 'manual';
         saveFix(it);
-        setState(() {});
+        await rebuildFiles();
       }
     } else {
       if (it.dupSuspect) {
@@ -3577,22 +3579,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         saveFix(it);
         await rebuildFiles();
       } else {
-        await editReceipt(it);
+        it.userExcluded = true;
+        it.ok = false;
+        saveFix(it);
+        await rebuildFiles();
       }
     }
   }
 
   // سحب إيصال المراجعة: صح ✓ / غلط ✗ (غلط = استبعاد لو مكرر، وإلا بيفتح التصحيح)
   Widget _swipeWrap(ReceiptItem item, Widget card) {
-    if (item.ignoredDoc || item.userExcluded || !item.needsReview) return card;
     final okLabel = item.dupSuspect
         ? _l(context, 'احتسبه باتش ✓', 'Count it ✓')
         : (item.dateOdd ? _l(context, 'سيب تاريخه ✓', 'Keep date ✓') : _l(context, 'صح ✓', 'OK ✓'));
     final badLabel = item.dupSuspect
         ? _l(context, 'مكرر - استبعده ✗', 'Duplicate ✗')
-        : (item.dateOdd ? _l(context, 'تاريخ الأغلب ✗', 'Use main date ✗') : _l(context, 'غلط - صحّحه ✗', 'Wrong - fix ✗'));
+        : (item.dateOdd ? _l(context, 'تاريخ الأغلب ✗', 'Use main date ✗') : _l(context, 'غلط (استبعاد) ✗', 'Wrong (Exclude) ✗'));
     return Dismissible(
-      key: ValueKey('sw_${item.path}'),
+      key: ValueKey('sw_${item.path}_${item.userExcluded}_${item.ok}'),
       direction: busy ? DismissDirection.none : DismissDirection.horizontal,
       confirmDismiss: (dir) async {
         await _onSwipe(item, dir == DismissDirection.startToEnd);
@@ -5102,15 +5106,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 side: BorderSide(color: _unitColor(item.row), width: 1.5),
               ),
               child: ListTile(
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ReceiptZoomPage(
-                      path: item.path,
-                      title: 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? ''}',
-                    ),
-                  ),
-                ),
+                onTap: () => editReceipt(item),
                 leading: Image.file(
                   File(item.path),
                   width: 48,
@@ -8072,17 +8068,17 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () => start(resumeOnly: false, count: false),
+                      onPressed: () => start(),
                       icon: const Icon(Icons.drive_file_rename_outline),
-                      label: const Text('تسمية فقط'),
+                      label: const Text('فحص وتسمية'),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: () => start(resumeOnly: false, count: true),
+                      onPressed: pendCount > 0 ? () => start(resumeOnly: true, count: true) : null,
                       icon: const Icon(Icons.play_arrow),
-                      label: const Text('تسمية وعد'),
+                      label: Text(pendCount > 0 ? 'بدء العد ($pendCount)' : 'بدء العد'),
                     ),
                   ),
                 ],
