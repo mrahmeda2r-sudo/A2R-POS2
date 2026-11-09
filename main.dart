@@ -2886,6 +2886,8 @@ class ReceiptItem {
   String? dateMain; // التاريخ الأغلب
   String? dateFix; // التاريخ اللي انت أكدته
   int? txn; // عدد معاملات الباتش المقروء من إيصال الإقفال
+  bool reprintSummary;
+  bool missingBatchClosed;
 
   ReceiptItem({
     required this.path,
@@ -2911,6 +2913,8 @@ class ReceiptItem {
     this.ignoredDoc = false,
     this.ign,
     this.dateOdd = false,
+    this.reprintSummary = false,
+    this.missingBatchClosed = false,
   }) : batches = batches ?? <double>[];
 
   // داخل في الإجماليات والـ PDF؟
@@ -2924,6 +2928,8 @@ class ReceiptItem {
       ignoredDoc ||
       dupSuspect ||
       dateOdd ||
+      reprintSummary ||
+      missingBatchClosed ||
       (!userExcluded &&
           (amount <= 0 ||
               row == null ||
@@ -2954,6 +2960,8 @@ void saveFix(ReceiptItem item) {
       if (item.dupDecision != null) 'dup': item.dupDecision,
       if (item.ign != null) 'ign': item.ign,
       if (item.dateFix != null) 'date': item.dateFix,
+      'rep': item.reprintSummary,
+      'nobc': item.missingBatchClosed,
     };
     File(fixPath)
       ..createSync(recursive: true)
@@ -3561,6 +3569,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         it.unusual = null;
         it.userExcluded = false;
         it.ignoredDoc = false;
+        it.reprintSummary = false;
+        it.missingBatchClosed = false;
         if (it.how != 'extra-batch') it.how = 'manual';
         saveFix(it);
         await rebuildFiles();
@@ -4290,6 +4300,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
     final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
     final extra = StringBuffer();
+    if (item.reprintSummary) {
+      extra.write('\n🚨 تحذير شديد: الإيصال ده REPRINT أو SUMMARY (ممكن يكون مكرر)!');
+    } else if (item.missingBatchClosed && !item.ignoredDoc) {
+      extra.write('\n⚠️ مش مكتوب فيه BATCH CLOSED SUCCESSFULLY - اتأكد منه');
+    }
     if (item.ignoredDoc) {
       extra.write('\n📄 اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه');
     }
@@ -4336,6 +4351,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         if (r.batches.length > 1) flags.add('${r.batches.length} باتشات');
         if (r.alt != null) flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
+        if (r.reprintSummary) flags.add('تحذير: REPRINT أو SUMMARY');
+        if (r.missingBatchClosed) flags.add('غير مكتوب BATCH CLOSED');
         if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
@@ -4570,14 +4587,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
           double? alt;
+          bool hasBatchClosed = RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res.text.toUpperCase());
+          bool hasReprint = RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res.text.toUpperCase());
+
           // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
-          final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0;
+          final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
           if (needSecond) {
             try {
             final ep = '$tmpDir/enh.jpg';
             await enhanceImageAsync(workPath, ep);
             final res2 = await recognizer.processImage(InputImage.fromFilePath(ep));
             final a2 = analyzeLines(toLines(res2));
+            if (RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res2.text.toUpperCase())) hasBatchClosed = true;
+            if (RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res2.text.toUpperCase())) hasReprint = true;
             try {
               File('$outputDir/ocr_debug.txt').writeAsStringSync(
                   '##### ${baseName(f.path)} (2nd read) total=${a2.val} ok=${a2.ok}\n',
@@ -4638,6 +4660,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             how: a.how,
             batches: a.batches,
             alt: alt,
+            reprintSummary: hasReprint,
+            missingBatchClosed: !hasBatchClosed,
           );
           item.txn = a.txn;
 
@@ -4670,6 +4694,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               item.date = fd;
               item.dateFix = fd;
             }
+            if (fx['rep'] == true || fx['rep'] == false) item.reprintSummary = fx['rep'];
+            if (fx['nobc'] == true || fx['nobc'] == false) item.missingBatchClosed = fx['nobc'];
           }
           rawReceipts.add(item);
         } else if (skipPay) {
@@ -5103,8 +5129,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               margin: const EdgeInsets.symmetric(vertical: 4),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: _unitColor(item.row), width: 1.5),
+                side: BorderSide(
+                  color: item.reprintSummary 
+                      ? Colors.red 
+                      : (item.missingBatchClosed ? Colors.orange : _unitColor(item.row)), 
+                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.5)
+                ),
               ),
+              color: item.reprintSummary ? _tintBg(context, Colors.red, soft: true) : null,
               child: ListTile(
                 onTap: () => editReceipt(item),
                 leading: Image.file(
@@ -5387,6 +5419,8 @@ class _ReviewPageState extends State<ReviewPage> {
     if (it.ignoredDoc) keepIgnored(it);
     it.how = 'manual';
     it.unusual = null;
+    it.reprintSummary = false;
+    it.missingBatchClosed = false;
     if (order != null) {
       it.orderNum = order;
       it.tid = numToTid[order];
