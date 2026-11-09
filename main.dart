@@ -3546,7 +3546,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _onSwipe(ReceiptItem it, bool approve) async {
+    Future<void> _onSwipe(ReceiptItem it, bool approve) async {
     if (busy) return;
     if (approve) {
       if (it.dupSuspect) {
@@ -4298,6 +4298,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
+    final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
     final extra = StringBuffer();
     if (item.reprintSummary) {
       extra.write('\n🚨 تحذير شديد: الإيصال ده REPRINT أو SUMMARY (ممكن يكون مكرر)!');
@@ -4319,7 +4320,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : item.userExcluded
             ? '\n🚫 مستبعد (مكرر)'
             : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup$unu$extra';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$dup$unu$extra';
   }
 
   String warningsText() {
@@ -4355,8 +4356,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
+        final txnStr = r.txn != null ? ' | معاملات: ${r.txn}' : '';
         sb.writeln('$mark ${baseName(r.path)}  ${r.unitName ?? '??'}  '
-            '${r.amount.toStringAsFixed(2)}$extra');
+            '${r.amount.toStringAsFixed(2)}$txnStr$extra');
       }
       sb.writeln(line);
       sb.writeln('الإجمالي العام: ${total.toStringAsFixed(2)} ج.م');
@@ -4585,9 +4587,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
           double? alt;
-          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           bool hasBatchClosed = RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res.text.toUpperCase());
           bool hasReprint = RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res.text.toUpperCase());
+
+          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
           if (needSecond) {
             try {
