@@ -652,6 +652,7 @@ Future<void> wipeEverything(BuildContext context) async {
   wipeTree(rawImagesDir);
   wipeTree('$baseDir/.scans');
   wipeTree(tmpDir);
+  wipeTree(mTmpDir);
   wipeTree(defaultMDest);
   // نسخ إيصالات الدفع المتسمية لو الفولدر مخصص
   try {
@@ -2071,6 +2072,13 @@ final String rawImagesDir = '$baseDir/raw_images';
 String outputDir = '$baseDir/output'; // ممكن المستخدم يغيّره من الشاشة
 final String defaultOutputDir = '$baseDir/output';
 final String tmpDir = '$baseDir/.tmp';
+// مجلد مؤقت خاص بإيصالات الدفع: تاب التقفيل بيمسح tmpDir في آخر فحصه وكان بيمسح ملفات العد وهي شغالة
+final String mTmpDir = '$baseDir/.tmp_m';
+void _ensureMTmp() {
+  try {
+    Directory(mTmpDir).createSync(recursive: true);
+  } catch (_) {}
+}
 final String cfgPath = '$baseDir/.app_cfg.json';
 
 String baseName(String path) => path.split('/').last;
@@ -7375,7 +7383,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     });
     try {
       Directory(destDir).createSync(recursive: true);
-      Directory(tmpDir).createSync(recursive: true);
+      Directory(mTmpDir).createSync(recursive: true);
     } catch (_) {}
 
     var rec = TextRecognizer(script: TextRecognitionScript.latin);
@@ -7421,7 +7429,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       await closeRec();
       _curLabel = '';
       try {
-        Directory(tmpDir).deleteSync(recursive: true);
+        Directory(mTmpDir).deleteSync(recursive: true);
       } catch (_) {}
     }
     results.sort(_cmpM);
@@ -7577,7 +7585,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         await for (final page in Printing.raster(bytes, pages: [pi], dpi: dpi)) {
           got = true;
           final png = await page.toPng();
-          final tp = File('$tmpDir/id_$pi.png');
+          final tp = File('$mTmpDir/id_$pi.png');
+          _ensureMTmp();
           await tp.writeAsBytes(png);
           try {
             final res = await _ocr(rec, tp.path);
@@ -7817,8 +7826,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final diff = <String>[];
     final empty = <int>[];
     for (var i = 0; i < ranges.length; i++) {
-      final fp = File('$tmpDir/f_$i.jpg');
+      final fp = File('$mTmpDir/f_$i.jpg');
       try {
+        _ensureMTmp();
         await fp.writeAsBytes(Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]));
         _tick(i + 1, ranges.length);
         final res = await _ocr(rec, fp.path);
@@ -7837,8 +7847,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         col.pageH = sp.h;
         col.pages.add(<Anchor>[]);
         _collect(res, 0, 1, col);
-      } catch (_) {
+      } catch (e) {
         failed++;
+        if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
       }
       try {
         fp.deleteSync();
@@ -7932,9 +7943,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             _tick(pg);
             final png = await page.toPng();
             tRaster += swAll.elapsedMilliseconds - t0;
-            final tp = File('$tmpDir/m_$pg.png');
+            final tp = File('$mTmpDir/m_$pg.png');
+            _ensureMTmp();
             await tp.writeAsBytes(png);
-            await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
+            await ocrPageStrips(rec, tp.path, '$mTmpDir/m_${pg}_s', col);
             try {
               tp.deleteSync();
             } catch (_) {}
@@ -7942,6 +7954,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           lastErr = null;
         } catch (e) {
           lastErr = e;
+          if (got && !_pageEnd(e)) {
+            failedPages.add(pg); // الصفحة اتقرت جزئياً وفشلت: نسجّلها بدل ما تتبلع
+            _dbg('PAGE_FAIL ${r.pdfName} p$pg: ${e.toString().split('\n').first}');
+          }
           if (_pageEnd(e) || got) break; // آخر صفحة عدّت، أو الصفحة اتقرت جزئياً: ما نعيدهاش
         }
       }
