@@ -3546,7 +3546,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-    Future<void> _onSwipe(ReceiptItem it, bool approve) async {
+  Future<void> _onSwipe(ReceiptItem it, bool approve) async {
     if (busy) return;
     if (approve) {
       if (it.dupSuspect) {
@@ -3573,7 +3573,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         it.missingBatchClosed = false;
         if (it.how != 'extra-batch') it.how = 'manual';
         saveFix(it);
-        await rebuildFiles();
+        setState(() {});
       }
     } else {
       if (it.dupSuspect) {
@@ -3589,10 +3589,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         saveFix(it);
         await rebuildFiles();
       } else {
-        it.userExcluded = true;
-        it.ok = false;
-        saveFix(it);
-        await rebuildFiles();
+        await editReceipt(it);
       }
     }
   }
@@ -6145,7 +6142,7 @@ class MResult {
   MResult(this.pdfName);
 
   bool get excluded => verdict < 0;
-  bool get pending => count < 0 && !excluded;
+  bool get pending => (count < 0 || (count == 0 && !cntOk)) && !excluded;
   bool get ok => verdict != 0 || (idOk && cntOk);
   String get key => '$pdfName:$size';
   List<String> get notes => [...idNotes, ...cntNotes];
@@ -7748,7 +7745,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         r.cntNotes.add('العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد');
       }
     }
-    final todo = results.where((r) => r.pending).toList();
+    final todo = results.where((r) => r.pending || (r.count == 0 && r.verdict == 0)).toList();
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
       final r = todo[i];
@@ -8101,7 +8098,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف'),
               )
             : FilledButton.icon(
-                onPressed: () => start(count: true),
+                onPressed: () {
+                  // If there are files with count 0, mark them as pending to force a recount
+                  for (final r in results) {
+                    if (r.count == 0 && r.verdict == 0) {
+                      r.count = -1;
+                      r.cntNotes.clear();
+                    }
+                  }
+                  start(count: true);
+                },
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('فحص وتسمية وعد'),
               ),
