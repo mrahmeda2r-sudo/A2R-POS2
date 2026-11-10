@@ -3502,9 +3502,49 @@ class _SA {
 class _StructPage {
   int sm = 0, mx = 0;
   int sm2 = 0; // الطريقة التانية: علامات إيصال الدفع بس (من غير الشعار/Terminal)
+  int sm3 = 0; // الطريقة 3 (الأساسية): عدّ بالتسلسل الرأسي للعلامات جوه كل عمود
   double h = 3000;
   final Map<String, int> types = {};
   final List<String> dbgAmt = []; // تشخيص: سطور AMOUNT اللي اتعدّت (نص@مكانها%)
+}
+
+// الطريقة 3: عدّ بالتسلسل الرأسي. كل إيصال علاماته بالترتيب من فوق لتحت: شعار ← Terminal ← RRN ← AMOUNT ← Approved.
+// بنمشي على علامات العمود من فوق، وكل ما الترتيب يرجع للأول (رتبة أقل أو زي اللي قبلها) يبقى ده إيصال جديد.
+// علامة ناقصة (قلم/تغطية/OCR) مش بتغيّر العدد، وعلامة زيادة قريبة جداً من نفس النوع (أقل من 0.7 من المسافة بين إيصالين) بتتدمج.
+int _seqCountCol(List<_SA> col, double h) {
+  const rank = <String, int>{'logo': 0, 'term': 1, 'rrn': 2, 'amount': 3, 'appr': 4};
+  final c = [...col]..sort((a, b) => a.cy.compareTo(b.cy));
+  final strong = <double>[
+    for (final a in c)
+      if (a.t == 'logo' || a.t == 'amount' || a.t == 'appr') a.cy
+  ]..sort();
+  final gaps = <double>[];
+  for (var i = 1; i < strong.length; i++) {
+    final g = strong[i] - strong[i - 1];
+    if (g > 0.03 * h) gaps.add(g);
+  }
+  var pitch = 0.1 * h;
+  if (gaps.isNotEmpty) {
+    gaps.sort();
+    final m = gaps.length ~/ 2;
+    pitch = gaps.length.isOdd ? gaps[m] : (gaps[m - 1] + gaps[m]) / 2;
+  }
+  final minP = 0.7 * pitch;
+  var n = 0, last = -1;
+  final lastCy = <String, double>{};
+  for (final a in c) {
+    final rk = rank[a.t] ?? 0;
+    if (last < 0) {
+      n = 1;
+    } else if (rk <= last) {
+      final prev = lastCy[a.t];
+      if (prev != null && a.cy - prev < minP) continue;
+      n++;
+    }
+    last = rk;
+    lastCy[a.t] = a.cy;
+  }
+  return n;
 }
 
 // ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) بتكون جوه الملف: مش إيصال دفع فمتتعدّش
@@ -3591,7 +3631,7 @@ _StructPage _structCount(RecognizedText res) {
   // الطريقة 1 (القديمة): أكبر عدد لأي علامة (شعار/Terminal/RRN/AMOUNT/APPROVED).
   // الطريقة 2: علامات إيصال الدفع بس (rrn/amount/appr)، لأن الشعار و Terminal موجودين كمان في إيصال الإقفال فبيزوّدوا إيصال.
   // الاتنين من نفس قراءة الـ OCR (من غير أي وقت زيادة).
-  var n = 0, n2 = 0;
+  var n = 0, n2 = 0, n3 = 0;
   for (final c in cols) {
     final cnt = <String, int>{};
     for (final a in c) {
@@ -3604,9 +3644,11 @@ _StructPage _structCount(RecognizedText res) {
       if (v > pay) pay = v;
     }
     n2 += pay;
+    n3 += _seqCountCol(c, h);
   }
   out.sm = n;
   out.sm2 = n2;
+  out.sm3 = n3;
   return out;
 }
 
@@ -8411,11 +8453,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (ranges.isEmpty) return false;
     final col = MCollector();
     final sw = Stopwatch()..start();
-    var total = 0, totalMx = 0, failed = 0, slips = 0;
+    var total = 0, totalMx = 0, failed = 0, slips = 0, total3 = 0;
     final diff = <String>[];
     final empty = <int>[];
     final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها (الطريقة 1)
     final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
+    final pageSm3 = <int, int>{}; // نفس الشيء بالطريقة 3 (الأساسية)
     var total2 = 0;
     final par = _parCount;
     // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
@@ -8452,9 +8495,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 slips++;
               } else {
                 final sp = _structCount(res);
-                _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types} AMT=${sp.dbgAmt}');
+                _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} m3=${sp.sm3} ${sp.types} AMT=${sp.dbgAmt}');
                 total += sp.sm;
                 total2 += sp.sm2;
+                total3 += sp.sm3;
                 totalMx += sp.mx;
                 if (sp.sm == 0) empty.add(i + 1);
                 if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
@@ -8463,6 +8507,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 _collect(res, 0, 1, col);
                 pageSm[i + 1] = sp.sm;
                 pageSm2[i + 1] = sp.sm2;
+                pageSm3[i + 1] = sp.sm3;
               }
             } catch (e) {
               failed++;
@@ -8497,9 +8542,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           continue;
         }
         final sp = _structCount(res);
-        _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types} AMT=${sp.dbgAmt}');
+        _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} m3=${sp.sm3} ${sp.types} AMT=${sp.dbgAmt}');
         total += sp.sm;
         total2 += sp.sm2;
+        total3 += sp.sm3;
         totalMx += sp.mx;
         if (sp.sm == 0) empty.add(i + 1);
         if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
@@ -8508,6 +8554,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         _collect(res, 0, 1, col);
         pageSm[i + 1] = sp.sm;
         pageSm2[i + 1] = sp.sm2;
+        pageSm3[i + 1] = sp.sm3;
       } catch (e) {
         failed++;
         if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
@@ -8523,22 +8570,29 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final total1 = total; // الطريقة 1 (القديمة)
     var dualInfo = '';
     var dualNote = '';
-    if (dualCount && total2 != total1) {
-      final bt = _batchOf(r);
+    // العدد الأساسي = الطريقة 3 (التسلسل الرأسي). الطريقتين التانيين (1 و2) للمقارنة والتحذير.
+    if (total3 > 0) total = total3;
+    final bt = _batchOf(r);
+    if (bt != null && bt != total) {
+      // الباتش (من التقفيل أو اللي كتبته بإيدك) بيطابق طريقة تانية: نختارها
+      if (bt == total1) {
+        total = total1;
+        dualInfo = ' • اتختار $total1 (طابق الباتش) بدل $total3';
+      } else if (bt == total2) {
+        total = total2;
+        dualInfo = ' • اتختار $total2 (طابق الباتش) بدل $total3';
+      }
+    }
+    if (dualCount && (total1 != total3 || total2 != total3) && !(bt != null && bt == total)) {
       final pg = <String>[];
       for (final k in pageSm.keys) {
-        if (pageSm2[k] != pageSm[k]) pg.add('$k (${pageSm[k]} أو ${pageSm2[k]})');
+        if (pageSm[k] != pageSm3[k] || pageSm2[k] != pageSm3[k]) {
+          pg.add('$k (${pageSm[k]} / ${pageSm2[k]} / ${pageSm3[k]})');
+        }
       }
       final pgTxt = pg.isEmpty ? '' : ' • الصفحات: ${pg.join('، ')}';
-      if (bt != null && bt == total1) {
-        dualInfo = ' • طريقتين: $total1 / $total2 (اتختار $total1، طابق الباتش)';
-      } else if (bt != null && bt == total2) {
-        total = total2;
-        dualInfo = ' • طريقتين: $total1 / $total2 (اتختار $total2، طابق الباتش)';
-      } else {
-        // مفيش باتش يحسم: نسيب العدد القديم ونعلّم الملف للمراجعة
-        dualNote = 'الطريقتين اختلفوا: $total1 أو $total2$pgTxt (راجع)';
-      }
+      // مفيش باتش يحسم: العدد الأساسي (طريقة 3) بيفضل، ونعلّم الملف للمراجعة
+      dualNote = 'الطرق اختلفت: $total1 / $total2 / $total3 (اتختار $total)$pgTxt (راجع)';
     }
     r.count = total;
     r.detail = 'عدّ سريع${par ? ' متوازي (تجريبي)' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
@@ -8560,21 +8614,21 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.cntNotes.add('صفحات الطريقتين اختلفوا فيها: ${diff.join('، ')} (راجعها لو العدد مهم)');
     }
     // الصفحات الكاملة غالباً نفس العدد (10 أو 15 مثلاً) وآخر صفحة بس بتقل: نعلّم الصفحة الشاذة
-    if (pageSm.length >= 4) {
-      final keys = pageSm.keys.toList()..sort();
+    if (pageSm3.length >= 4) {
+      final keys = pageSm3.keys.toList()..sort();
       final lastK = keys.last;
       final body = keys.where((k) => k != lastK).toList();
       final freq = <int, int>{};
       for (final k in body) {
-        freq[pageSm[k]!] = (freq[pageSm[k]!] ?? 0) + 1;
+        freq[pageSm3[k]!] = (freq[pageSm3[k]!] ?? 0) + 1;
       }
       final top = freq.entries.reduce((a, b) => a.value >= b.value ? a : b);
       if (top.key > 0 && top.value >= body.length * 0.6) {
         final odd = <String>[];
         for (final k in body) {
-          if (pageSm[k] != top.key) odd.add('$k (${pageSm[k]})');
+          if (pageSm3[k] != top.key) odd.add('$k (${pageSm3[k]})');
         }
-        if (pageSm[lastK]! > top.key) odd.add('$lastK (${pageSm[lastK]}) آخر صفحة أكتر من باقي الصفحات');
+        if (pageSm3[lastK]! > top.key) odd.add('$lastK (${pageSm3[lastK]}) آخر صفحة أكتر من باقي الصفحات');
         if (odd.isNotEmpty) {
           r.cntNotes.add('أغلب الصفحات ${top.key} إيصال، والصفحات دي مختلفة: ${odd.join('، ')} (راجعها)');
         }
