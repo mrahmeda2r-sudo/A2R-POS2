@@ -1629,31 +1629,28 @@ Parsed parseReceipt(String txt) {
   return Parsed(grand, bsum, bvals);
 }
 
-// كل المبالغ المحتملة للإيصال (علشان لو القراءة الأساسية غلطت، تختار الصح من القايمة).
-// الترتيب بالأرجحية: الإجمالي العام (GRAND TOTALS) المتكرر، بعدين مجموع إجماليات الكروت، بعدين باقي المبالغ.
+// المبالغ المقترحة للإيصال. الأولوية للجزء التحتاني (قسم GRAND TOTALS) لأن الإجمالي الصح فيه، ومن غير باقي الأرقام.
+// لو القسم ده ما اتقراش خالص (علامات/تلف): نرجع لمجموع الكروت وإجماليات الكروت بس.
 List<double> candidateAmounts(List<String> texts) {
-  final score = <double, double>{};
-  void add(double v, double wt) {
-    if (v >= 0.5) score[v] = (score[v] ?? 0) + wt;
-  }
-
+  final grandScore = <double, int>{};
+  final otherScore = <double, double>{};
   for (final t in texts) {
-    final tt = t.split(RegExp(r'THANK\s*YOU|Hotline|App\s*Version', caseSensitive: false)).first;
     final pr = parseReceipt(t);
     for (final g in pr.grand) {
-      add(g, 3);
+      if (g >= 0.5) grandScore[g] = (grandScore[g] ?? 0) + 1;
     }
     final b = pr.bsum;
-    if (b != null && b > 0) add(round2(b), 4);
+    if (b != null && b > 0) otherScore[round2(b)] = (otherScore[round2(b)] ?? 0) + 3;
     for (final v in pr.bvals) {
-      add(v, 1.5);
-    }
-    for (final v in amountsIn(tt)) {
-      add(v, 1);
+      if (v >= 0.5) otherScore[v] = (otherScore[v] ?? 0) + 1;
     }
   }
-  final ks = score.keys.toList()..sort((a, b) => score[b]!.compareTo(score[a]!));
-  return ks.take(8).toList();
+  if (grandScore.isNotEmpty) {
+    final ks = grandScore.keys.toList()..sort((a, b) => grandScore[b]!.compareTo(grandScore[a]!));
+    return ks.take(3).toList();
+  }
+  final ks = otherScore.keys.toList()..sort((a, b) => otherScore[b]!.compareTo(otherScore[a]!));
+  return ks.take(4).toList();
 }
 
 // دمج مقترحات القراءتين: اللي ظهر في الاتنين الأول
@@ -1666,7 +1663,7 @@ List<double> mergeCands(List<double> a, List<double> b) {
   for (final v in [...a, ...b]) {
     if (!has(out, v)) out.add(v);
   }
-  return out.take(10).toList();
+  return out.take(4).toList();
 }
 
 class Decision {
@@ -5838,7 +5835,7 @@ class _ReviewPageState extends State<ReviewPage> {
                     spacing: 6,
                     runSpacing: 4,
                     children: [
-                      for (final v in it.cands)
+                      for (final v in it.cands.where((v) => (v - it.amount).abs() >= 0.005))
                         ActionChip(
                           label: Text(v.toStringAsFixed(2)),
                           onPressed: () => setState(() => amt.text = v.toStringAsFixed(2)),
