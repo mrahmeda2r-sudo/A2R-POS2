@@ -3504,6 +3504,7 @@ class _StructPage {
   int sm2 = 0; // الطريقة التانية: علامات إيصال الدفع بس (من غير الشعار/Terminal)
   double h = 3000;
   final Map<String, int> types = {};
+  final List<String> dbgAmt = []; // تشخيص: سطور AMOUNT اللي اتعدّت (نص@مكانها%)
 }
 
 // ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) بتكون جوه الملف: مش إيصال دفع فمتتعدّش
@@ -3550,7 +3551,10 @@ _StructPage _structCount(RecognizedText res) {
     if (nameRe.hasMatch(u)) add('logo');
     if (u.contains('TERMINAL')) add('term');
     if (rrnRe.hasMatch(u)) add('rrn');
-    if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) add('amount');
+    if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) {
+      add('amount');
+      out.dbgAmt.add('${l.text.length > 22 ? l.text.substring(0, 22) : l.text}@${h > 0 ? (l.cy * 100 / h).round() : 0}%');
+    }
     if (u.contains('APPROVED')) add('appr');
   }
   // إزالة التكرار (نفس العلامة اتقرت مرتين)
@@ -8448,7 +8452,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 slips++;
               } else {
                 final sp = _structCount(res);
-                _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types}');
+                _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types} AMT=${sp.dbgAmt}');
                 total += sp.sm;
                 total2 += sp.sm2;
                 totalMx += sp.mx;
@@ -8493,7 +8497,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           continue;
         }
         final sp = _structCount(res);
-        _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types}');
+        _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types} AMT=${sp.dbgAmt}');
         total += sp.sm;
         total2 += sp.sm2;
         totalMx += sp.mx;
