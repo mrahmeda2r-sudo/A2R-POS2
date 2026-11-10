@@ -390,6 +390,25 @@ class _RootPageState extends State<RootPage> {
   int tab = 0;
 
   @override
+  void initState() {
+    super.initState();
+    chainStep.addListener(_onChain);
+  }
+
+  @override
+  void dispose() {
+    chainStep.removeListener(_onChain);
+    super.dispose();
+  }
+
+  // أثناء الفحص الشامل: نفتح التاب اللي شغال دلوقتي
+  void _onChain() {
+    final s = chainStep.value;
+    final t = s == 1 ? 0 : (s == 2 ? 1 : tab);
+    if (mounted && t != tab) setState(() => tab = t);
+  }
+
+  @override
   Widget build(BuildContext context) {
     AppSettings.of(context);
     return Scaffold(
@@ -512,6 +531,105 @@ final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<in
 final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
 bool homeBusyG = false;
 bool machBusyG = false;
+
+// ───────── الفحص الشامل: الباتشات (التقفيل) ثم الملفات (إيصالات الدفع) ورا بعض ─────────
+bool chainRunning = false;
+bool chainAbort = false;
+bool homeAutoG = false;
+bool machAutoG = false;
+final ValueNotifier<int> chainStep = ValueNotifier<int>(0); // 0 = واقف، 1 = الباتشات، 2 = الملفات
+final ValueNotifier<String> chainSummary = ValueNotifier<String>('');
+Future<void> Function()? homeRunG;
+Future<void> Function()? machRunG;
+String Function()? homeSumG;
+String Function()? machSumG;
+
+Future<void> runAllScans() async {
+  if (chainRunning || homeBusyG || machBusyG) return;
+  if (homeRunG == null || machRunG == null) return;
+  final perm = await Permission.manageExternalStorage.request();
+  if (!perm.isGranted) {
+    chainSummary.value = 'لازم تسمح بالوصول لكل الملفات الأول.';
+    return;
+  }
+  chainRunning = true;
+  chainAbort = false;
+  chainSummary.value = '';
+  try {
+    await Permission.notification.request();
+  } catch (_) {}
+  await askBatteryExempt();
+  try {
+    await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'جاري الفحص الشامل (باتشات + ملفات)...'});
+  } catch (_) {}
+  try {
+    await _chan.invokeMethod('keepScreenOn', {'on': true});
+  } catch (_) {}
+  try {
+    chainStep.value = 1;
+    await homeRunG!();
+    if (!chainAbort) {
+      chainStep.value = 2;
+      await machRunG!();
+    }
+  } catch (e) {
+    _dbg('CHAIN_ERROR $e');
+  } finally {
+    final aborted = chainAbort;
+    chainRunning = false;
+    chainStep.value = 0;
+    try {
+      if (homeAutoG || machAutoG) {
+        await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'مراقبة الإيصالات الجديدة...'});
+      } else {
+        await _chan.invokeMethod('stopKeepAlive');
+      }
+    } catch (_) {}
+    try {
+      await _chan.invokeMethod('keepScreenOn', {'on': false});
+    } catch (_) {}
+    final hs = homeSumG?.call() ?? '';
+    final ms = machSumG?.call() ?? '';
+    chainSummary.value = '${aborted ? 'اتوقف الفحص الشامل.' : 'اكتمل الفحص الشامل ✓'}\n'
+        '• الباتشات: $hs\n'
+        '• الملفات: $ms';
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      try {
+        await _chan.invokeMethod('notify', {
+          'title': tr('A2R POS - انتهى الفحص الشامل'),
+          'text': tr('$hs • $ms')
+        });
+      } catch (_) {}
+    }
+  }
+}
+
+Widget _runAllCard() => ValueListenableBuilder<int>(
+      valueListenable: chainStep,
+      builder: (c, step, _) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: (chainRunning || homeBusyG || machBusyG) ? null : () => runAllScans(),
+              icon: const Icon(Icons.playlist_play),
+              label: Text(step == 1
+                  ? 'جاري فحص الباتشات (1 من 2)...'
+                  : step == 2
+                      ? 'جاري فحص الملفات (2 من 2)...'
+                      : 'فحص الباتشات والملفات مرة واحدة'),
+            ),
+            ValueListenableBuilder<String>(
+              valueListenable: chainSummary,
+              builder: (c2, sm, _) => sm.isEmpty
+                  ? const SizedBox.shrink()
+                  : Padding(padding: const EdgeInsets.only(top: 6), child: _statusBox(sm)),
+            ),
+          ],
+        ),
+      ),
+    );
 
 void _publishClosing(List<ReceiptItem> items) {
   final sums = <int, int>{};
@@ -1050,6 +1168,15 @@ const List<List<String>> _kEnPhrases = [
   ['حفظ والتالي', 'Save & next'],
   ['اتوقف. فاضل', 'Stopped. Remaining'],
   ['اكتمل العد:', 'Counting complete:'],
+  ['فحص الباتشات والملفات مرة واحدة', 'Scan patches & files in one go'],
+  ['جاري فحص الباتشات', 'Scanning patches'],
+  ['جاري فحص الملفات', 'Scanning files'],
+  ['اكتمل الفحص الشامل', 'Full scan complete'],
+  ['اتوقف الفحص الشامل', 'Full scan stopped'],
+  ['فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', 'Auto scan (watches new files and scans them by itself)'],
+  ['الباقي صح', 'Mark rest OK'],
+  ['فتح الصورة', 'Open image'],
+  ['إرسال الصورة', 'Send image'],
   ['إرسال الملف', 'Send file'],
   ['تغيير اللغة', 'Change language'],
   ['مصطفى كامل', 'Mostafa Kamel'],
@@ -3602,6 +3729,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     autoScan = _readCfg()['autoScan'] == true;
+    homeAutoG = autoScan;
+    homeRunG = () => runFullPipeline();
+    homeSumG = _countLine;
     if (autoScan) _startAuto();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
@@ -3732,6 +3862,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _autoTimer?.cancel();
+    homeRunG = null;
+    homeSumG = null;
+    homeAutoG = false;
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     WidgetsBinding.instance.removeObserver(this);
@@ -3796,7 +3929,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _autoTick() async {
-    if (!mounted || !autoScan || busy) return;
+    if (!mounted || !autoScan || busy || chainRunning || machBusyG) return;
     final sig = _scanSig();
     if (sig.isEmpty || sig == _doneSig) {
       _pendSig = '';
@@ -3811,6 +3944,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _setAuto(bool v) async {
+    homeAutoG = v;
     setState(() => autoScan = v);
     final cfg = _readCfg();
     cfg['autoScan'] = v;
@@ -4263,6 +4397,76 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  // ملخص العد (زي رسالة "اكتمل العد" في إيصالات الدفع): صور، اتسمّى، إجمالي
+  String _countLine() {
+    final counted = processedItems
+        .where((e) => !e.userExcluded && !e.ignoredDoc && e.ign != 'drop' && e.amount > 0)
+        .toList();
+    final total = counted.fold<double>(0, (a, e) => a + e.amount);
+    final named = processedItems.where((e) => e.tid != null && e.orderNum != null && !e.userExcluded).length;
+    final rv = processedItems.where((e) => e.needsReview).length;
+    return '${processedItems.length} صورة، $named اتسمّى، إجمالي ${total.toStringAsFixed(2)}'
+        '${missingTerminals.isNotEmpty ? ' (ناقص ${missingTerminals.length} ماكينة)' : ''}'
+        '${rv > 0 ? ' ($rv للمراجعة)' : ''}';
+  }
+
+  // "الباقي صح": يعلّم كل إيصالات المراجعة صح مرة واحدة (زي إيصالات الدفع)
+  Future<void> _markRestOk() async {
+    final list = processedItems.where((e) => e.needsReview).toList();
+    if (list.isEmpty) return;
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('الباقي صح'),
+        content: Text('هتعلّم ${list.length} إيصال على إنهم صح؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('لا')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('تمام')),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    var skipped = 0;
+    for (final it in list) {
+      if (it.dupSuspect) {
+        keepAsExtraBatch(it, processedItems);
+      } else if (it.dateOdd) {
+        it.dateFix = it.date;
+        it.dateOdd = false;
+        saveFix(it);
+      } else if (it.amount <= 0 || it.row == null) {
+        skipped++;
+      } else {
+        it.ok = true;
+        it.alt = null;
+        it.unusual = null;
+        it.userExcluded = false;
+        it.ignoredDoc = false;
+        it.reprintSummary = false;
+        it.missingBatchClosed = false;
+        if (it.how != 'extra-batch') it.how = 'manual';
+        saveFix(it);
+      }
+    }
+    await _refresh();
+    if (skipped > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: w.Text(_l(context, '$skipped إيصال ناقصه مبلغ أو ماكينة، كمّلهم من القلم.',
+              '$skipped receipt(s) are missing an amount or machine; fill them in with the pencil.'))));
+    }
+  }
+
+  Future<void> shareOneReceipt(ReceiptItem item) async {
+    if (!File(item.path).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الصورة مش موجودة.')),
+      );
+      return;
+    }
+    await Share.shareXFiles([XFile(item.path)],
+        text: item.orderNum != null ? 'ماكينة ${item.orderNum}' : baseName(item.path));
+  }
+
   Future<void> rebuildFiles() async {
     setState(() => status = 'جاري توليد الملفات وتحديث الشيتات...');
     final dateCounts = <String, int>{};
@@ -4377,7 +4581,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ];
     writeReport(reportDate);
 
-    setState(() => status = 'اكتمل!\n'
+    setState(() => status = 'اكتمل العد: ${_countLine()}\n'
         '$xlsxLine\n'
         '• تم توليد ملف الـ PDF المجمع.' +
         (extraPdfPaths.isEmpty
@@ -4470,7 +4674,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> runFullPipeline({List<String>? manualPaths, bool auto = false}) async {
     if (manualPaths == null) _doneSig = _scanSig();
-    if (!auto) {
+    if (!auto && !chainRunning) {
       try {
         await Permission.notification.request();
       } catch (_) {}
@@ -4488,15 +4692,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       if (autoScan) {
         await _watchService(true); // نفضل شغالين نراقب الإيصالات الجديدة
-      } else {
+      } else if (!chainRunning) {
         try {
           await _chan.invokeMethod('stopKeepAlive');
         } catch (_) {}
       }
-      try {
-        await _chan.invokeMethod('keepScreenOn', {'on': false});
-      } catch (_) {}
-      if (_life != AppLifecycleState.resumed) {
+      if (!chainRunning) {
+        try {
+          await _chan.invokeMethod('keepScreenOn', {'on': false});
+        } catch (_) {}
+      }
+      if (_life != AppLifecycleState.resumed && !chainRunning) {
         final rv = processedItems.where((e) => e.needsReview).length;
         final txt = 'تم فحص ${processedItems.length} إيصال'
             '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
@@ -5019,6 +5225,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !busy,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (!didPop && busy) {
+          // الفحص شغال: نرجّع التطبيق للخلفية بس علشان الفحص يكمّل
+          try {
+            await _chan.invokeMethod('moveToBack');
+          } catch (_) {}
+        }
+      },
+      child: _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     AppSettings.of(context);
     final xlsx = latestOutput('.xlsx');
     final pdf = latestOutput('.pdf');
@@ -5095,7 +5316,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       bottomNavigationBar: _bottomBar(
         busy
             ? FilledButton.icon(
-                onPressed: stopReq ? null : () => setState(() => stopReq = true),
+                onPressed: stopReq ? null : () => setState(() {
+                  chainAbort = true;
+                  stopReq = true;
+                }),
                 style: FilledButton.styleFrom(
                     backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
                 icon: const Icon(Icons.stop),
@@ -5151,6 +5375,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   busy ? null : (v) => setState(() => autoRotate = v)),
             ],
           ]),
+          _runAllCard(),
           _statusBox(status),
           const SizedBox(height: 6),
           _statsRow(),
@@ -5164,6 +5389,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     _l(context, '💡 اسحب إيصال المراجعة: صح ✓ في ناحية وغلط ✗ في الناحية التانية',
                         '💡 Swipe a review receipt: OK ✓ one way, wrong ✗ the other'),
                     style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              ),
+            if (reviewOnly && reviewCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: _mini(Icons.done_all, 'الباقي صح ($reviewCount)', busy ? null : _markRestOk),
+                ),
               ),
             const SizedBox(height: 6),
           ],
@@ -5287,6 +5520,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     IconButton(
                       icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
                       onPressed: () => editReceipt(item),
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: tr('المزيد'),
+                      padding: EdgeInsets.zero,
+                      onSelected: (v) {
+                        if (v == 'open') {
+                          openFile(item.path, 'image/*');
+                        } else if (v == 'share') {
+                          shareOneReceipt(item);
+                        }
+                      },
+                      itemBuilder: (_) => [
+                        PopupMenuItem(value: 'open', child: w.Text(_l(context, 'فتح الصورة', 'Open image'))),
+                        PopupMenuItem(value: 'share', child: w.Text(_l(context, 'إرسال الصورة', 'Send image'))),
+                      ],
                     ),
                   ],
                 ),
@@ -7090,12 +7338,132 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   AppLifecycleState _life = AppLifecycleState.resumed;
   String destDir = loadMOut();
   String _curLabel = ''; // اسم الملف اللي بيتعد دلوقتي (للتقدّم صفحة صفحة)
+  bool autoScan = false;
+  Timer? _autoTimer;
+  String _doneSig = '';
+  String _pendSig = '';
+
+  // ───── فحص تلقائي: بيراقب ملفات PDF الجديدة ويفحصها لوحده (زي التقفيل) ─────
+  String _scanSig() {
+    try {
+      final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
+      final now = DateTime.now();
+      final cutoff = days < 0
+          ? DateTime(2000)
+          : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+      final have = results.map((r) => r.key).toSet();
+      var n = 0, size = 0, latest = 0;
+      for (final d in dirs) {
+        if (d.path == destDir || d.path == defaultMDest) continue;
+        for (final e in d.listSync().whereType<File>()) {
+          final b = baseName(e.path);
+          if (b.startsWith('.')) continue;
+          final fd = fileDate(e);
+          if (fd.isBefore(cutoff)) continue;
+          var isPdf = b.toLowerCase().trim().endsWith('.pdf');
+          if (!isPdf && !b.substring(b.lastIndexOf('.') + 1).contains(RegExp(r'[A-Za-z0-9]'))) {
+            isPdf = _hasPdfHeader(e);
+          }
+          if (!isPdf || _isAppReportName(b)) continue;
+          final len = e.lengthSync();
+          if (skipDone && have.contains('$b:$len')) continue; // اتفحص قبل كده
+          n++;
+          size += len;
+          final ms = fd.millisecondsSinceEpoch;
+          if (ms > latest) latest = ms;
+        }
+      }
+      return n == 0 ? '' : '$n:$size:$latest';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> _watchService(bool on) async {
+    try {
+      if (on) {
+        await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'مراقبة الإيصالات الجديدة...'});
+      } else {
+        await _chan.invokeMethod('stopKeepAlive');
+      }
+    } catch (_) {}
+  }
+
+  void _startAuto() {
+    _autoTimer?.cancel();
+    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _watchService(true);
+  }
+
+  void _stopAuto() {
+    _autoTimer?.cancel();
+    _autoTimer = null;
+    _watchService(homeAutoG);
+  }
+
+  Future<void> _autoTick() async {
+    if (!mounted || !autoScan || busy || chainRunning || homeBusyG) return;
+    final sig = _scanSig();
+    if (sig.isEmpty || sig == _doneSig) {
+      _pendSig = '';
+      return;
+    }
+    if (sig != _pendSig) {
+      _pendSig = sig; // لسه الملفات بتنزل: نستنى الدورة الجاية
+      return;
+    }
+    _pendSig = '';
+    await _startCountAll(auto: true);
+  }
+
+  Future<void> _setAuto(bool v) async {
+    machAutoG = v;
+    setState(() => autoScan = v);
+    final cfg = _readCfg();
+    cfg['autoScanM'] = v;
+    _writeCfg(cfg);
+    if (v) {
+      _doneSig = '';
+      _startAuto();
+      await askBatteryExempt();
+    } else {
+      _stopAuto();
+    }
+  }
+
+  // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
+  Future<void> _startCountAll({bool auto = false}) async {
+    _doneSig = _scanSig();
+    if (!auto) {
+      for (final r in results) {
+        if (r.count <= 0 && r.verdict == 0) {
+          r.count = -1;
+          r.tries = 0; // من غير ده الملف اللي فشل قبل كده بيتخطّى على طول
+          r.cntNotes.clear();
+        }
+      }
+    }
+    await start(count: true);
+  }
+
+  // ملخص العد (نفس رسالة "اكتمل العد")
+  String _countLine() {
+    final pend = results.where((r) => r.pending).length;
+    final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
+    final named = results.where((r) => r.newName != null && !r.excluded).length;
+    return '${results.length} ملف، $named اتسمّى، إجمالي $total إيصال${pend > 0 ? ' (فاضل $pend لسه)' : ''}';
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     pdfDir = loadPdfDir();
+    autoScan = _readCfg()['autoScanM'] == true;
+    machAutoG = autoScan;
+    machRunG = () => _startCountAll();
+    machSumG = _countLine;
+    if (autoScan) _startAuto();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
@@ -7112,6 +7480,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   @override
   void dispose() {
+    _autoTimer?.cancel();
+    machRunG = null;
+    machSumG = null;
+    machAutoG = false;
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     closingTxn.removeListener(_onClosing);
@@ -7470,13 +7842,19 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     try {
       await _run(resumeOnly, count, manualPaths: manualPaths);
     } finally {
-      try {
-        await _chan.invokeMethod('stopKeepAlive');
-      } catch (_) {}
-      try {
-        await _chan.invokeMethod('keepScreenOn', {'on': false});
-      } catch (_) {}
-      if (_life != AppLifecycleState.resumed) {
+      if (autoScan) {
+        await _watchService(true); // نفضل شغالين نراقب الملفات الجديدة
+      } else if (!chainRunning) {
+        try {
+          await _chan.invokeMethod('stopKeepAlive');
+        } catch (_) {}
+      }
+      if (!chainRunning) {
+        try {
+          await _chan.invokeMethod('keepScreenOn', {'on': false});
+        } catch (_) {}
+      }
+      if (_life != AppLifecycleState.resumed && !chainRunning) {
         final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
         try {
           await _chan.invokeMethod('notify', {
@@ -8259,6 +8637,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final reviewN = results.where((r) => !r.ok).length;
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
+    final totalRc = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
     _syncBadge(machBadge, reviewN);
     machBusyG = busy;
     return Scaffold(
@@ -8337,22 +8716,18 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       ),
       bottomNavigationBar: _bottomBar(
         busy
-            ? OutlinedButton.icon(
-                onPressed: stopReq ? null : () => setState(() => stopReq = true),
+            ? FilledButton.icon(
+                onPressed: stopReq ? null : () => setState(() {
+                  chainAbort = true;
+                  stopReq = true;
+                }),
+                style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
                 icon: const Icon(Icons.stop),
-                label: const Text('إيقاف'),
+                label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف'),
               )
             : FilledButton.icon(
-                onPressed: () {
-                  for (final r in results) {
-                    if (r.count <= 0 && r.verdict == 0) {
-                      r.count = -1;
-                      r.tries = 0; // من غير ده الملف اللي فشل قبل كده بيتخطّى على طول
-                      r.cntNotes.clear();
-                    }
-                  }
-                  start(count: true);
-                },
+                onPressed: () => _startCountAll(),
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('فحص وتسمية وعد'),
               ),
@@ -8363,6 +8738,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
+            _switchRow('فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
+            const Divider(height: 4),
             InkWell(
               onTap: () => setState(() => settingsOpen = !settingsOpen),
               child: Padding(
@@ -8403,12 +8780,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
             ],
           ]),
+          _runAllCard(),
           _statusBox(status),
           const SizedBox(height: 6),
           Row(
             children: [
               _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blue),
               _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.green),
+              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.purple),
               _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
               _statCard(Icons.fact_check, 'مراجعة', '$reviewN', Colors.orange),
             ],
