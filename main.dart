@@ -1099,6 +1099,7 @@ const Map<String, String> _kEnExact = {
   'فحص التقفيل': 'Scan closing',
   'فحص إيصالات الدفع': 'Scan payment receipts',
   'فحص الكل': 'Scan all',
+  'عد متوازي': 'Parallel count',
   'يدوي': 'Manual',
   'العد المزدوج (طريقتين للعد ومقارنتهم)': 'Dual count (two methods, compared)',
   'اليوم': 'Today',
@@ -1142,6 +1143,8 @@ const List<List<String>> _kEnRules = [
 
 // مرتبة من الأطول للأقصر علشان العبارات الطويلة تتبدّل الأول
 const List<List<String>> _kEnPhrases = [
+  ['متوازي (تجريبي)', 'parallel (experimental)'],
+  ['متوازي', 'parallel'],
   ['الوقت المستغرق:', 'Time taken:'],
   ['Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع', 'Terminal ID unclear; unit determined from Merchant ID/name inside the PDF, review'],
   ['الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه', 'This file does not look like a machine receipt (weak Terminal ID reading), review it'],
@@ -3412,6 +3415,9 @@ bool _loadFast() {
     return true;
   }
 }
+
+// ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
+const int _kParWorkers = 2;
 
 bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل لوحدها كاحتياطي لو السريعة فشلت)
 
@@ -7499,6 +7505,19 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  // ⚡ عدّ متوازي (تجريبي): نفس العد بالظبط بس بيقرا صفحتين مع بعض. لو طلع مش دقيق نمسحه (دي + كتلة par في _countOneFast + الزرار)
+  bool _parCount = false;
+
+  Future<void> _startCountParallel() async {
+    if (busy) return;
+    _parCount = true;
+    try {
+      await _startCountAll();
+    } finally {
+      _parCount = false;
+    }
+  }
+
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
   Future<void> _startCountAll({bool auto = false}) async {
     _doneSig = _scanSig();
@@ -8394,7 +8413,71 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها (الطريقة 1)
     final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
     var total2 = 0;
-    for (var i = 0; i < ranges.length; i++) {
+    final par = _parCount;
+    // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
+    if (par) {
+      final extra = <TextRecognizer>[
+        for (var k = 1; k < _kParWorkers; k++) TextRecognizer(script: TextRecognitionScript.latin)
+      ];
+      final recs = <TextRecognizer>[rec, ...extra];
+      try {
+        for (var i0 = 0; i0 < ranges.length; i0 += recs.length) {
+          final idxs = <int>[for (var k = i0; k < i0 + recs.length && k < ranges.length; k++) k];
+          _ensureMTmp();
+          _tick(i0 + 1, ranges.length);
+          final outs = await Future.wait(<Future<Object>>[
+            for (var j = 0; j < idxs.length; j++)
+              (() async {
+                final i = idxs[j];
+                try {
+                  final path = '$mTmpDir/f_$i.jpg';
+                  await File(path).writeAsBytes(Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]));
+                  return await _ocr(recs[j], path);
+                } catch (e) {
+                  return e;
+                }
+              })()
+          ]);
+          for (var j = 0; j < idxs.length; j++) {
+            final i = idxs[j];
+            final out = outs[j];
+            try {
+              if (out is! RecognizedText) throw out;
+              final res = out;
+              if (_isIdSlip(res)) {
+                slips++;
+              } else {
+                final sp = _structCount(res);
+                total += sp.sm;
+                total2 += sp.sm2;
+                totalMx += sp.mx;
+                if (sp.sm == 0) empty.add(i + 1);
+                if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
+                col.pageH = sp.h;
+                col.pages.add(<Anchor>[]);
+                _collect(res, 0, 1, col);
+                pageSm[i + 1] = sp.sm;
+                pageSm2[i + 1] = sp.sm2;
+              }
+            } catch (e) {
+              failed++;
+              if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
+            }
+            try {
+              File('$mTmpDir/f_$i.jpg').deleteSync();
+            } catch (_) {}
+          }
+          await Future.delayed(const Duration(milliseconds: 2));
+        }
+      } finally {
+        for (final e in extra) {
+          try {
+            await e.close();
+          } catch (_) {}
+        }
+      }
+    }
+    if (!par) for (var i = 0; i < ranges.length; i++) {
       final fp = File('$mTmpDir/f_$i.jpg');
       try {
         _ensureMTmp();
@@ -8428,7 +8511,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 2));
     }
-    _dbg('FAST ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
+    _dbg('FAST${par ? '-PAR' : ''} ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
     if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
     final sc = col.finish();
     final total1 = total; // الطريقة 1 (القديمة)
@@ -8452,8 +8535,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
     }
     r.count = total;
-    r.detail = 'عدّ سريع • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
-        '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}';
+    r.detail = 'عدّ سريع${par ? ' متوازي (تجريبي)' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
+        '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}'
+        ' • ⏱ ${fmtElapsed(Duration(seconds: (sw.elapsedMilliseconds / 1000).round()))}';
     if (dualInfo.isNotEmpty) r.detail += dualInfo;
     if (dualNote.isNotEmpty) {
       r.cntOk = false;
@@ -8604,7 +8688,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.cntNotes.add('صفحات فشلت قراءتها: ${failedPages.join('، ')}، العدد ممكن يكون ناقص');
     }
     r.detail = 'RRN كامل ${sc.full} • ناقص القراءة ${sc.partial}${sc.rangeText}'
-        '${col.slips > 0 ? ' • أوراق تعريف مُتجاهلة ${col.slips}' : ''}';
+        '${col.slips > 0 ? ' • أوراق تعريف مُتجاهلة ${col.slips}' : ''}'
+        ' • ⏱ ${fmtElapsed(Duration(seconds: (swAll.elapsedMilliseconds / 1000).round()))}';
     if (!sc.agree) {
       r.cntOk = false;
       r.cntNotes.add(sc.seqNote);
@@ -8809,6 +8894,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 results.isEmpty ? null : openOverview),
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
+            _quickBtnG(context, Icons.bolt, 'عد متوازي',
+                (busy || chainRunning) ? null : _startCountParallel),
             _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
