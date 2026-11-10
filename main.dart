@@ -3083,7 +3083,7 @@ bool _loadFast() {
   }
 }
 
-bool fastCount = _loadFast();
+bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل لوحدها كاحتياطي لو السريعة فشلت)
 
 void toggleFastCount() {
   fastCount = !fastCount;
@@ -3227,13 +3227,21 @@ _StructPage _structCount(RecognizedText res) {
   cols.add(cur);
   // لكل عمود: كل علامة بتظهر مرة واحدة في كل إيصال، فأكبر عدد لأي علامة = عدد الإيصالات في العمود
   // (لو علامة اتقرت ناقصة التانية بتعوّض، ومش بيتأثر بميل الإيصال ولا بترتيب القراءة)
+  // إصلاح الزيادة 1: الشعار (logo) و Terminal موجودين كمان في إيصال الإقفال/الملخص (من غير RRN)،
+  // فلو دخلوا في أكبر عدد بيزوّدوا إيصال زيادة. فبنعدّ بعلامات إيصال الدفع بس (rrn / amount / appr).
+  // وعمود فيه شعار/Terminal بس من غير أي علامة دفع (زي إيصال الإقفال لوحده) بياخد صفر.
   var n = 0;
   for (final c in cols) {
     final cnt = <String, int>{};
     for (final a in c) {
       cnt[a.t] = (cnt[a.t] ?? 0) + 1;
     }
-    n += cnt.values.reduce((a, b) => a > b ? a : b);
+    var pay = 0;
+    for (final k in const ['rrn', 'amount', 'appr']) {
+      final v = cnt[k] ?? 0;
+      if (v > pay) pay = v;
+    }
+    n += pay;
   }
   out.sm = n;
   return out;
@@ -7825,6 +7833,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var total = 0, totalMx = 0, failed = 0, slips = 0;
     final diff = <String>[];
     final empty = <int>[];
+    final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها
     for (var i = 0; i < ranges.length; i++) {
       final fp = File('$mTmpDir/f_$i.jpg');
       try {
@@ -7847,6 +7856,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         col.pageH = sp.h;
         col.pages.add(<Anchor>[]);
         _collect(res, 0, 1, col);
+        pageSm[i + 1] = sp.sm;
       } catch (e) {
         failed++;
         if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
@@ -7871,6 +7881,27 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     if (diff.isNotEmpty) {
       r.cntNotes.add('صفحات الطريقتين اختلفوا فيها: ${diff.join('، ')} (راجعها لو العدد مهم)');
+    }
+    // الصفحات الكاملة غالباً نفس العدد (10 أو 15 مثلاً) وآخر صفحة بس بتقل: نعلّم الصفحة الشاذة
+    if (pageSm.length >= 4) {
+      final keys = pageSm.keys.toList()..sort();
+      final lastK = keys.last;
+      final body = keys.where((k) => k != lastK).toList();
+      final freq = <int, int>{};
+      for (final k in body) {
+        freq[pageSm[k]!] = (freq[pageSm[k]!] ?? 0) + 1;
+      }
+      final top = freq.entries.reduce((a, b) => a.value >= b.value ? a : b);
+      if (top.key > 0 && top.value >= body.length * 0.6) {
+        final odd = <String>[];
+        for (final k in body) {
+          if (pageSm[k] != top.key) odd.add('$k (${pageSm[k]})');
+        }
+        if (pageSm[lastK]! > top.key) odd.add('$lastK (${pageSm[lastK]}) آخر صفحة أكتر من باقي الصفحات');
+        if (odd.isNotEmpty) {
+          r.cntNotes.add('أغلب الصفحات ${top.key} إيصال، والصفحات دي مختلفة: ${odd.join('، ')} (راجعها)');
+        }
+      }
     }
     // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
     if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
@@ -8145,7 +8176,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   value: 'log',
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
-              PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
               PopupMenuItem(
                   value: 'battery',
                   child: w.Text(AppSettings.of(context).isAr ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
