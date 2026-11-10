@@ -3122,7 +3122,7 @@ String _setCell(String xml, String col, int row,
   return xml.replaceRange(rm.start, rm.end, rowXml);
 }
 
-List<int> fillTemplate(List<int> bytes, Map<int, double> totals) {
+List<int> fillTemplate(List<int> bytes, Map<int, double> totals, Map<int, int> counts) {
   final arc = ZipDecoder().decodeBytes(bytes);
   final sheetPath = _firstSheetPath(arc);
   final out = Archive();
@@ -3135,6 +3135,10 @@ List<int> fillTemplate(List<int> bytes, Map<int, double> totals) {
       var xml = utf8.decode(c, allowMalformed: true);
       for (var r = 2; r <= 11; r++) {
         final tot = round2(totals[r] ?? 0.0);
+        // عمود C (POS Count): عدد الأجهزة اللي اشتغلت فعلاً في الوحدة (مش عدد الباتشات)
+        final cnt = counts[r] ?? 0;
+        xml = _setCell(xml, 'C', r, (ref, st, f0) =>
+            '<c r="$ref"${st != null ? ' s="$st"' : ''}><v>$cnt</v></c>');
         xml = _setCell(xml, 'D', r, (ref, st, f0) =>
             '<c r="$ref"${st != null ? ' s="$st"' : ''}><v>$tot</v></c>');
         final cash = _readNum(xml, 'E', r);
@@ -4663,13 +4667,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
     }
+    // عدد الأجهزة الفعلي لكل وحدة: كل جهاز بيتعدّ مرة واحدة حتى لو عمل أكتر من باتش في اليوم
+    final unitDevices = <int, Set<String>>{};
     for (final item in mainItems) {
       if (item.row != null && item.amount > 0) {
         unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
+        unitDevices
+            .putIfAbsent(item.row!, () => <String>{})
+            .add('${item.orderNum ?? item.tid ?? item.path}');
       }
     }
+    final unitCounts = <int, int>{for (final e in unitDevices.entries) e.key: e.value.length};
 
-    // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود D (مبلغ كل وحدة) و F (الإجمالي)
+    // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود C (عدد الأجهزة) و D (مبلغ كل وحدة) و F (الإجمالي)
     var xlsxLine = '• تم توليد الإكسيل: الاسكندريه $reportDate.xlsx';
     standardXlsxPath = null;
     final tpl = await loadTemplateBytes();
@@ -4677,7 +4687,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all (ولا مضاف للتطبيق)، فمتعملش إكسيل.';
     } else {
       try {
-        final outBytes = fillTemplate(tpl, unitTotals);
+        final outBytes = fillTemplate(tpl, unitTotals, unitCounts);
         final stdFile = File('$outputDir/الاسكندريه $reportDate.xlsx');
         stdFile.createSync(recursive: true);
         stdFile.writeAsBytesSync(outBytes);
