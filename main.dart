@@ -1100,7 +1100,7 @@ const Map<String, String> _kEnExact = {
   'فحص إيصالات الدفع': 'Scan payment receipts',
   'فحص الكل': 'Scan all',
   'يدوي': 'Manual',
-  'العد المزدوج': 'Dual count',
+  'العد المزدوج (طريقتين للعد ومقارنتهم)': 'Dual count (two methods, compared)',
   'اليوم': 'Today',
   'الكل': 'All',
   'تمام': 'OK',
@@ -8739,6 +8739,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         children: [
           _settingsCard([
             _switchRow('فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
+            _switchRow('العد المزدوج (طريقتين للعد ومقارنتهم)', dualCount, busy
+                ? null
+                : (v) {
+                    toggleDualCount();
+                    setState(() {});
+                  }),
             const Divider(height: 4),
             InkWell(
               onTap: () => setState(() => settingsOpen = !settingsOpen),
@@ -8783,12 +8789,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     _pathAct(Icons.drive_file_move, 'نقل الملفات لفولدر', 'Move files to a folder',
                         busy ? null : transferGood),
                   ]),
-              _switchRow('العد المزدوج', dualCount, busy
-                  ? null
-                  : (v) {
-                      toggleDualCount();
-                      setState(() {});
-                    }),
             ],
           ]),
           _runAllCard(),
