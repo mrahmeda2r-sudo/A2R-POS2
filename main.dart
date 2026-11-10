@@ -8448,6 +8448,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 slips++;
               } else {
                 final sp = _structCount(res);
+                _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types}');
                 total += sp.sm;
                 total2 += sp.sm2;
                 totalMx += sp.mx;
@@ -8492,6 +8493,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           continue;
         }
         final sp = _structCount(res);
+        _dbg('PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} ${sp.types}');
         total += sp.sm;
         total2 += sp.sm2;
         totalMx += sp.mx;
