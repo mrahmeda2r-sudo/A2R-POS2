@@ -3085,6 +3085,26 @@ bool _loadFast() {
 
 bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل لوحدها كاحتياطي لو السريعة فشلت)
 
+bool _loadDual() {
+  try {
+    return _readCfg()['dualCount'] != false;
+  } catch (_) {
+    return true;
+  }
+}
+
+// العد المزدوج: بيحسب بطريقتين من نفس القراءة، ولو اختلفوا بيعلّم الملف للمراجعة (أو بيختار اللي يطابق الباتش)
+bool dualCount = _loadDual();
+
+void toggleDualCount() {
+  dualCount = !dualCount;
+  try {
+    final m = _readCfg();
+    m['dualCount'] = dualCount;
+    _writeCfg(m);
+  } catch (_) {}
+}
+
 void toggleFastCount() {
   fastCount = !fastCount;
   try {
@@ -3145,6 +3165,7 @@ class _SA {
 
 class _StructPage {
   int sm = 0, mx = 0;
+  int sm2 = 0; // الطريقة التانية: علامات إيصال الدفع بس (من غير الشعار/Terminal)
   double h = 3000;
   final Map<String, int> types = {};
 }
@@ -3227,23 +3248,25 @@ _StructPage _structCount(RecognizedText res) {
   cols.add(cur);
   // لكل عمود: كل علامة بتظهر مرة واحدة في كل إيصال، فأكبر عدد لأي علامة = عدد الإيصالات في العمود
   // (لو علامة اتقرت ناقصة التانية بتعوّض، ومش بيتأثر بميل الإيصال ولا بترتيب القراءة)
-  // إصلاح الزيادة 1: الشعار (logo) و Terminal موجودين كمان في إيصال الإقفال/الملخص (من غير RRN)،
-  // فلو دخلوا في أكبر عدد بيزوّدوا إيصال زيادة. فبنعدّ بعلامات إيصال الدفع بس (rrn / amount / appr).
-  // وعمود فيه شعار/Terminal بس من غير أي علامة دفع (زي إيصال الإقفال لوحده) بياخد صفر.
-  var n = 0;
+  // الطريقة 1 (القديمة): أكبر عدد لأي علامة (شعار/Terminal/RRN/AMOUNT/APPROVED).
+  // الطريقة 2: علامات إيصال الدفع بس (rrn/amount/appr)، لأن الشعار و Terminal موجودين كمان في إيصال الإقفال فبيزوّدوا إيصال.
+  // الاتنين من نفس قراءة الـ OCR (من غير أي وقت زيادة).
+  var n = 0, n2 = 0;
   for (final c in cols) {
     final cnt = <String, int>{};
     for (final a in c) {
       cnt[a.t] = (cnt[a.t] ?? 0) + 1;
     }
+    n += cnt.values.reduce((a, b) => a > b ? a : b);
     var pay = 0;
     for (final k in const ['rrn', 'amount', 'appr']) {
       final v = cnt[k] ?? 0;
       if (v > pay) pay = v;
     }
-    n += pay;
+    n2 += pay;
   }
   out.sm = n;
+  out.sm2 = n2;
   return out;
 }
 
@@ -3568,17 +3591,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
+  // أثناء الفحص: نحدّث الشاشة بس (الملفات بتتبني في آخر المعالجة). بعد الفحص: إعادة بناء الإكسيل والـ PDF
+  Future<void> _refresh() async {
+    if (busy) {
+      if (mounted) setState(() {});
+    } else {
+      await rebuildFiles();
+    }
+  }
+
   Future<void> _onSwipe(ReceiptItem it, bool approve) async {
-    if (busy) return;
     if (approve) {
       if (it.dupSuspect) {
         keepAsExtraBatch(it, processedItems);
-        await rebuildFiles();
+        await _refresh();
       } else if (it.dateOdd) {
         it.dateFix = it.date;
         it.dateOdd = false;
         saveFix(it);
-        await rebuildFiles();
+        await _refresh();
       } else {
         if (it.amount <= 0 || it.row == null) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -3595,7 +3626,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         it.missingBatchClosed = false;
         if (it.how != 'extra-batch') it.how = 'manual';
         saveFix(it);
-        await rebuildFiles();
+        await _refresh();
       }
     } else {
       if (it.dupSuspect) {
@@ -3603,18 +3634,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         it.userExcluded = true;
         it.dupDecision = 'drop';
         saveFix(it);
-        await rebuildFiles();
+        await _refresh();
       } else if (it.dateOdd) {
         if (it.dateMain != null) it.date = it.dateMain;
         it.dateFix = it.date;
         it.dateOdd = false;
         saveFix(it);
-        await rebuildFiles();
+        await _refresh();
       } else {
         it.userExcluded = true;
         it.ok = false;
         saveFix(it);
-        await rebuildFiles();
+        await _refresh();
       }
     }
   }
@@ -3629,7 +3660,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : (item.dateOdd ? _l(context, 'تاريخ الأغلب ✗', 'Use main date ✗') : _l(context, 'غلط (استبعاد) ✗', 'Wrong (Exclude) ✗'));
     return Dismissible(
       key: ValueKey('sw_${item.path}_${item.userExcluded}_${item.ok}'),
-      direction: busy ? DismissDirection.none : DismissDirection.horizontal,
+      direction: DismissDirection.horizontal,
       confirmDismiss: (dir) async {
         await _onSwipe(item, dir == DismissDirection.startToEnd);
         return false;
@@ -4045,7 +4076,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems)),
     );
     if (changed == true) {
-      await rebuildFiles();
+      await _refresh();
     } else if (mounted) {
       setState(() {});
     }
@@ -4060,7 +4091,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     if (changed == true) {
-      await rebuildFiles();
+      await _refresh();
     } else if (mounted) {
       setState(() {});
     }
@@ -4720,15 +4751,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             if (fx['nobc'] == true || fx['nobc'] == false) item.missingBatchClosed = fx['nobc'];
           }
           rawReceipts.add(item);
+          processedItems.add(item); // يظهر فوراً (مؤقت) ويتنظّم في آخر المعالجة
         } else if (skipPay) {
           excludedPay.add(baseName(f.path));
           if (ign != 'drop') {
-            ignoredItems.add(ReceiptItem(
+            final igItem = ReceiptItem(
               path: f.path,
               key: fkey,
               how: 'none',
               ignoredDoc: true,
-            ));
+            );
+            ignoredItems.add(igItem);
+            processedItems.add(igItem); // يظهر فوراً (مؤقت)
           }
         }
       } catch (e) {
@@ -4744,7 +4778,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     await recognizer.close();
 
+    // العناصر المؤقتة اللي ظهرت أثناء القراءة: بتتشال هنا وبتتضاف تاني مرتبة في آخر المعالجة
+    void dropProvisional() =>
+        processedItems.removeWhere((e) => rawReceipts.contains(e) || ignoredItems.contains(e));
+
     if (stopReq) {
+      dropProvisional();
       if (mounted) {
         setState(() {
           busy = false;
@@ -4755,6 +4794,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     if (rawReceipts.isEmpty) {
+      dropProvisional();
       processedItems.addAll(ignoredItems);
       setState(() {
         busy = false;
@@ -4766,7 +4806,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
     final prio = <String, int>{'manual': 0, 'terminal': 0, 'new-terminal': 0, 'fuzzy': 1, 'file-number': 2};
-    final withTid = rawReceipts.where((r) => r.tid != null).toList();
+    final withTid = rawReceipts.where((r) => r.tid != null && !r.userExcluded).toList();
     withTid.sort((a, b) {
       final c = (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3);
       return c != 0 ? c : rawReceipts.indexOf(a).compareTo(rawReceipts.indexOf(b));
@@ -4816,7 +4856,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     for (final r in rawReceipts) {
-      if (r.skip || r.tid != null || r.row == null) continue;
+      if (r.skip || r.userExcluded || r.tid != null || r.row == null) continue;
       if (r.conflict &&
           (r.how == 'terminal' || r.how == 'new-terminal' || r.how == 'fuzzy' || r.dupDecision == 'keep')) {
         giveSuffix(r); // نفس الماكينة بمبلغ مختلف = باتش إضافي
@@ -4905,6 +4945,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
     }
 
+    dropProvisional();
     processedItems.addAll(kept);
     processedItems.addAll(ignoredItems);
     await rebuildFiles();
@@ -5097,7 +5138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               _quickBtn(Icons.picture_as_pdf, 'PDF',
                   pdf == null ? null : () => openFile(pdf, 'application/pdf')),
               _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
-              _quickBtn(Icons.fact_check, 'مراجعة ($reviewCount)', busy ? null : openReview),
+              _quickBtn(Icons.fact_check, 'مراجعة ($reviewCount)', openReview),
             ],
           ),
           if (missingTerminals.isNotEmpty) ...[
@@ -5203,7 +5244,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const Icon(Icons.cancel, color: Colors.red),
                     IconButton(
                       icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
-                      onPressed: busy ? null : () => editReceipt(item),
+                      onPressed: () => editReceipt(item),
                     ),
                   ],
                 ),
@@ -7833,7 +7874,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var total = 0, totalMx = 0, failed = 0, slips = 0;
     final diff = <String>[];
     final empty = <int>[];
-    final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها
+    final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها (الطريقة 1)
+    final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
+    var total2 = 0;
     for (var i = 0; i < ranges.length; i++) {
       final fp = File('$mTmpDir/f_$i.jpg');
       try {
@@ -7850,6 +7893,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
         final sp = _structCount(res);
         total += sp.sm;
+        total2 += sp.sm2;
         totalMx += sp.mx;
         if (sp.sm == 0) empty.add(i + 1);
         if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
@@ -7857,6 +7901,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         col.pages.add(<Anchor>[]);
         _collect(res, 0, 1, col);
         pageSm[i + 1] = sp.sm;
+        pageSm2[i + 1] = sp.sm2;
       } catch (e) {
         failed++;
         if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
@@ -7869,9 +7914,34 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     _dbg('FAST ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
     if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
     final sc = col.finish();
+    final total1 = total; // الطريقة 1 (القديمة)
+    var dualInfo = '';
+    var dualNote = '';
+    if (dualCount && total2 != total1) {
+      final bt = _batchOf(r);
+      final pg = <String>[];
+      for (final k in pageSm.keys) {
+        if (pageSm2[k] != pageSm[k]) pg.add('$k (${pageSm[k]} أو ${pageSm2[k]})');
+      }
+      final pgTxt = pg.isEmpty ? '' : ' • الصفحات: ${pg.join('، ')}';
+      if (bt != null && bt == total1) {
+        dualInfo = ' • طريقتين: $total1 / $total2 (اتختار $total1، طابق الباتش)';
+      } else if (bt != null && bt == total2) {
+        total = total2;
+        dualInfo = ' • طريقتين: $total1 / $total2 (اتختار $total2، طابق الباتش)';
+      } else {
+        // مفيش باتش يحسم: نسيب العدد القديم ونعلّم الملف للمراجعة
+        dualNote = 'الطريقتين اختلفوا: $total1 أو $total2$pgTxt (راجع)';
+      }
+    }
     r.count = total;
     r.detail = 'عدّ سريع • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
         '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}';
+    if (dualInfo.isNotEmpty) r.detail += dualInfo;
+    if (dualNote.isNotEmpty) {
+      r.cntOk = false;
+      r.cntNotes.add(dualNote);
+    }
     if (failed > 0) {
       r.cntOk = false;
       r.cntNotes.add('$failed صفحة فشلت قراءتها، العدد ممكن يكون ناقص');
@@ -8151,6 +8221,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 setState(() => pdfDir = null);
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'dual') {
+                toggleDualCount();
+                setState(() {});
               } else if (v == 'fast') {
                 toggleFastCount();
                 setState(() {});
@@ -8176,6 +8249,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   value: 'log',
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
+              PopupMenuItem(value: 'dual', child: Text(dualCount ? 'العد المزدوج: شغال ← قفله' : 'العد المزدوج: مقفول ← شغّله')),
               PopupMenuItem(
                   value: 'battery',
                   child: w.Text(AppSettings.of(context).isAr ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
