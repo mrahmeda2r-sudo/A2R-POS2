@@ -1629,6 +1629,46 @@ Parsed parseReceipt(String txt) {
   return Parsed(grand, bsum, bvals);
 }
 
+// كل المبالغ المحتملة للإيصال (علشان لو القراءة الأساسية غلطت، تختار الصح من القايمة).
+// الترتيب بالأرجحية: الإجمالي العام (GRAND TOTALS) المتكرر، بعدين مجموع إجماليات الكروت، بعدين باقي المبالغ.
+List<double> candidateAmounts(List<String> texts) {
+  final score = <double, double>{};
+  void add(double v, double wt) {
+    if (v >= 0.5) score[v] = (score[v] ?? 0) + wt;
+  }
+
+  for (final t in texts) {
+    final tt = t.split(RegExp(r'THANK\s*YOU|Hotline|App\s*Version', caseSensitive: false)).first;
+    final pr = parseReceipt(t);
+    for (final g in pr.grand) {
+      add(g, 3);
+    }
+    final b = pr.bsum;
+    if (b != null && b > 0) add(round2(b), 4);
+    for (final v in pr.bvals) {
+      add(v, 1.5);
+    }
+    for (final v in amountsIn(tt)) {
+      add(v, 1);
+    }
+  }
+  final ks = score.keys.toList()..sort((a, b) => score[b]!.compareTo(score[a]!));
+  return ks.take(8).toList();
+}
+
+// دمج مقترحات القراءتين: اللي ظهر في الاتنين الأول
+List<double> mergeCands(List<double> a, List<double> b) {
+  bool has(List<double> l, double v) => l.any((x) => (x - v).abs() < 0.005);
+  final out = <double>[];
+  for (final v in a) {
+    if (has(b, v)) out.add(v);
+  }
+  for (final v in [...a, ...b]) {
+    if (!has(out, v)) out.add(v);
+  }
+  return out.take(10).toList();
+}
+
 class Decision {
   final double val;
   final bool ok;
@@ -1922,6 +1962,7 @@ class Analysis {
   String? date;
   String debug = '';
   int? txn; // عدد معاملات الباتش (من إيصال الإقفال)
+  List<double> cands = <double>[]; // مبالغ مقترحة من نفس الإيصال (الأرجح الأول)
   Analysis(this.tid, this.how, this.row, this.unitName, this.val, this.ok,
       this.batches, this.date);
 }
@@ -2004,6 +2045,7 @@ Analysis analyzeLines(List<OcrLine> all) {
   }
   final result = Analysis(tid, how, row, name, total, ok, batches, date);
   result.debug = dbg.toString();
+  result.cands = candidateAmounts(allTexts);
   result.txn = (txns.isNotEmpty && txns.every((e) => e != null)) ? txns.fold<int>(0, (a, e) => a + e!) : null;
   return result;
 }
@@ -2013,6 +2055,7 @@ double round2(double val) => double.parse(val.toStringAsFixed(2));
 // دمج القراءة التانية (الصورة المحسّنة) في القراءة الأولى.
 // بترجع قيمة المبلغ التانية لو متعارضة مع الأولى (علشان تتراجع)، وإلا null.
 double? mergeSecondRead(Analysis a, Analysis b) {
+  a.cands = mergeCands(a.cands, b.cands);
   if (a.tid == null && b.tid != null) {
     a.tid = b.tid;
     a.row = b.row;
@@ -2902,6 +2945,7 @@ class ReceiptItem {
   int? txn; // عدد معاملات الباتش المقروء من إيصال الإقفال
   bool reprintSummary;
   bool missingBatchClosed;
+  List<double> cands = <double>[]; // مبالغ مقترحة من الإيصال (للاختيار في المراجعة)
 
   ReceiptItem({
     required this.path,
@@ -4717,6 +4761,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             missingBatchClosed: !hasBatchClosed,
           );
           item.txn = a.txn;
+          item.cands = a.cands;
 
           // تصحيح يدوي محفوظ من مرة سابقة
           final fx = fixes[key];
@@ -5775,6 +5820,30 @@ class _ReviewPageState extends State<ReviewPage> {
                   TextButton(
                     onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
                     child: const Text('استخدمها'),
+                  ),
+                ],
+              ),
+            ),
+          if ((it.alt != null || !it.ok || it.amount <= 0 || it.unusual != null) &&
+              it.cands.where((v) => (v - it.amount).abs() >= 0.005).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('مبالغ لقيتها في الإيصال (اضغط على الصح):',
+                      style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      for (final v in it.cands)
+                        ActionChip(
+                          label: Text(v.toStringAsFixed(2)),
+                          onPressed: () => setState(() => amt.text = v.toStringAsFixed(2)),
+                        ),
+                    ],
                   ),
                 ],
               ),
