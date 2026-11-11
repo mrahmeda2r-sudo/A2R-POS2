@@ -856,6 +856,8 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   }
   String? tid = findTerminalIn([text]);
   tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
+  // إيصال السيستم لازم فيه رقم ترمنل (أي ترمنل). من غيره مش إيصال سيستم. رقم إصدار البرنامج (v60 / v51...) ملوش علاقة
+  if (tid == null) return null;
 
   String? date;
   final dm = RegExp(r'(?<!\d)(\d{1,2})\s?[.\-/]\s?(\d{1,2})\s?[.\-/]\s?(20\d{2})(?!\d)').firstMatch(text);
@@ -1000,10 +1002,15 @@ void _publishClosing(List<ReceiptItem> items, [List<SysTotal> sys = const <SysTo
     final p = latest[sy.tid!];
     if (p == null || sy.printed.compareTo(p.printed) > 0) latest[sy.tid!] = sy;
   }
+  final sysMap = <int, int>{};
   for (final e in latest.entries) {
     final n = terminals[e.key]?.orderNum;
-    if (n != null) sums[n] = e.value.txn!;
+    if (n != null) {
+      sums[n] = e.value.txn!;
+      sysMap[n] = e.value.txn!;
+    }
   }
+  sysTxnByNum = sysMap;
   final cur = closingTxn.value;
   var same = cur.length == sums.length;
   if (same) {
@@ -1165,6 +1172,7 @@ Future<void> wipeEverything(BuildContext context) async {
   imageCache.clearLiveImages();
   await clearScanCache();
   closingTxn.value = <int, int>{};
+  sysTxnByNum = <int, int>{};
   wipeSignal.value++;
   final mb = (bytes / 1048576).toStringAsFixed(1);
   m.showSnackBar(SnackBar(
@@ -5096,7 +5104,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       final diff = round2(tot - sys.amount!);
       final multi = n > 1 ? ' (مجموع $n باتشات)' : '';
-      final res = diff.abs() < 0.01 ? '✅ مطابق$multi' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}$multi';
+      final res = diff == 0 ? '✅ مطابق$multi' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}$multi';
       sysStr = '\n🖥️ السيستم: ${_fmtMoney(sys.amount!)} ج.م | $res';
     }
     final unu = item.unusual != null ? '\n📊 ${item.unusual}' : '';
@@ -5607,8 +5615,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     await saveScanCache();
     for (final s in sysReads) {
-      if (s.tid == null || s.amount == null) {
-        warnings.add('${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا ${s.tid == null ? 'الترمنل' : 'المبلغ'} - مش محسوبة كباتش');
+      if (s.amount == null) {
+        warnings.add('${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا المبلغ - مش محسوبة كباتش');
       }
     }
     await recognizer.close();
@@ -7024,6 +7032,16 @@ void saveMOut(String? f) {
   _writeCfg(m);
 }
 
+// عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
+Map<int, int> sysTxnByNum = <int, int>{};
+
+// لو عدد الـ PDF = عدد السيستم (إلكترونية): ملاحظة التسلسل (RRN) متتحسبش مراجعة. ده القرار الوحيد اللي السيستم بيحسمه
+bool _sysCntMatch(MResult r) {
+  final n = r.orderNum;
+  if (n == null || r.count < 0) return false;
+  return sysTxnByNum[n] == r.count;
+}
+
 // الفرق (في عدد الإيصالات) الأقل من الرقم ده = تحذير بس، مش مراجعة. لملفات إيصالات الدفع فقط
 const int kSoftGap = 6;
 
@@ -7050,7 +7068,8 @@ class MResult {
 
   bool get excluded => verdict < 0;
   bool get pending => count < 0 && !excluded;
-  bool get ok => verdict != 0 || (idOk && cntOk);
+  bool seqBad = false; // العدد مختلف عن تسلسل الـ RRN بـ kSoftGap إيصالات أو أكتر
+  bool get ok => verdict != 0 || (idOk && cntOk && (!seqBad || _sysCntMatch(this)));
   // فرق بسيط (أقل من kSoftGap إيصالات، ناقص أو زيادة): الملف سليم ومش بيدخل المراجعة، بس عليه علامة تحذير ⚠️
   bool get softWarn {
     if (excluded || pending || verdict != 0 || !ok) return false;
@@ -7077,6 +7096,7 @@ class MResult {
         'cntNotes': cntNotes,
         'idOk': idOk,
         'cntOk': cntOk,
+        'seqBad': seqBad,
         'verdict': verdict,
         'exp': ctl.text,
       };
@@ -7096,6 +7116,7 @@ class MResult {
     r.cntNotes.addAll(((j['cntNotes'] as List?) ?? const []).map((e) => e.toString()));
     r.idOk = j['idOk'] != false;
     r.cntOk = j['cntOk'] != false;
+    r.seqBad = j['seqBad'] == true;
     r.verdict = (j['verdict'] as num?)?.toInt() ?? 0;
     r.ctl.text = (j['exp'] ?? '').toString();
     return r;
@@ -7921,7 +7942,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
         }
       }
       final diff = round2(tot - s.amount!);
-      final okMatch = diff.abs() < 0.01;
+      final okMatch = diff == 0;
       if (!okMatch) sysDiffs++;
       sysRows.add(Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
@@ -8904,6 +8925,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.idNotes.add('الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه');
       r.count = 0;
       r.cntOk = true;
+      r.seqBad = false;
       r.detail = 'للمراجعة (مش معدود)';
       return;
     }
@@ -9259,7 +9281,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
     if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
       // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
-      if ((total - sc.rangeLen!).abs() >= kSoftGap) r.cntOk = false;
+      if ((total - sc.rangeLen!).abs() >= kSoftGap) r.seqBad = true;
       final miss = sc.seqMissing.take(10).map((n) => n.toString().padLeft(6, '0')).join(' - ');
       r.cntNotes.add('العدد $total بس التسلسل ${sc.rangeLen}'
           '${sc.seqMissing.isNotEmpty ? '\nأرقام مش لاقيها: [ $miss ]${sc.seqMissing.length > 10 ? ' ...' : ''}' : ''}');
@@ -9290,6 +9312,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     r.cntNotes.clear();
     r.cntOk = true;
+    r.seqBad = false;
     if (src == null) {
       r.count = 0;
       r.cntOk = false;
@@ -9305,6 +9328,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       r.cntNotes.clear();
       r.cntOk = true;
+      r.seqBad = false;
     }
     final col = MCollector();
     _tmStrips = 0;
@@ -9375,7 +9399,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         ' • ⏱ ${fmtElapsed(Duration(seconds: (swAll.elapsedMilliseconds / 1000).round()))}';
     if (!sc.agree) {
       // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
-      if ((sc.count - sc.rangeLen!).abs() >= kSoftGap) r.cntOk = false;
+      if ((sc.count - sc.rangeLen!).abs() >= kSoftGap) r.seqBad = true;
       r.cntNotes.add(sc.seqNote);
     }
     if (sc.otherDay.isNotEmpty) {
