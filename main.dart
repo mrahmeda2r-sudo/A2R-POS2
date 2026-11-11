@@ -390,6 +390,7 @@ Widget _scanBar({
                 flex: 3,
                 child: FilledButton.icon(
                   onPressed: chainRunning ? null : onScanThis,
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
                   icon: const Icon(Icons.play_arrow),
                   label: Text(thisLabel),
                 ),
@@ -397,8 +398,9 @@ Widget _scanBar({
               const SizedBox(width: 8),
               Expanded(
                 flex: 2,
-                child: FilledButton.tonalIcon(
+                child: OutlinedButton.icon(
                   onPressed: (chainRunning || homeBusyG || machBusyG) ? null : () => runAllScans(),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
                   icon: const Icon(Icons.playlist_play),
                   label: const Text('فحص الكل'),
                 ),
@@ -4102,23 +4104,57 @@ Future<void> askBatteryExempt({bool force = false}) async {
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
 // كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
-Widget _statCard(IconData icon, String label, String value, Color c) => Expanded(
+Widget _statCard(IconData icon, String label, String value, Color c,
+        {VoidCallback? onTap, bool compact = false}) =>
+    Expanded(
       child: Card(
         margin: const EdgeInsets.symmetric(horizontal: 2),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-          child: Column(
-            children: [
-              Icon(icon, size: 18, color: c),
-              const SizedBox(height: 2),
-              FittedBox(
-                  child: w.Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-              Text(label, style: const TextStyle(fontSize: 11)),
-            ],
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8, horizontal: 4),
+            child: Column(
+              children: [
+                Icon(icon, size: compact ? 16 : 18, color: c),
+                const SizedBox(height: 1),
+                FittedBox(
+                    child: w.Text(value,
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: compact ? 14 : 15))),
+                Text(label, style: TextStyle(fontSize: compact ? 10.5 : 11)),
+              ],
+            ),
           ),
         ),
       ),
     );
+
+// فلتر مضغوط (شيبس صغيرة على نفس سطر "عرض"). شيب المراجعة رمادي لو مفيش مراجعة
+Widget _filterRowCompact(bool reviewOnly, int all, int review, void Function(bool) onPick) {
+  const tight = VisualDensity(horizontal: -3, vertical: -3);
+  const fs = TextStyle(fontSize: 12);
+  return Row(
+    children: [
+      const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+      const SizedBox(width: 8),
+      ChoiceChip(
+        label: Text('الكل ($all)', style: fs),
+        visualDensity: tight,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        selected: !reviewOnly,
+        onSelected: (_) => onPick(false),
+      ),
+      const SizedBox(width: 6),
+      ChoiceChip(
+        label: Text('مراجعة ($review)', style: fs),
+        visualDensity: tight,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        selected: reviewOnly,
+        onSelected: review == 0 ? null : (_) => onPick(true),
+      ),
+    ],
+  );
+}
 
 // لون ثابت لكل وحدة (حسب رقم الصف) علشان تتميز بالنظر
 Color _unitColor(int? row) {
@@ -4409,10 +4445,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final rv = processedItems.where((e) => e.needsReview).length;
     return Row(
       children: [
-        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue),
-        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green),
-        _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber),
-        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange),
+        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue, compact: true),
+        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green, compact: true),
+        _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
+            compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
+        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange,
+            compact: true, onTap: rv == 0 ? null : openReview),
       ],
     );
   }
@@ -5067,6 +5105,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  // فرق مبلغ السيستم عن مجموع باتشات نفس الماكينة (null = مفيش صورة سيستم). مقياس بس
+  double? _sysDiffOf(ReceiptItem item) {
+    if (item.ignoredDoc || item.userExcluded) return null;
+    final sys = _sysOf(item);
+    if (sys == null) return null;
+    var tot = 0.0;
+    for (final x in processedItems) {
+      if (x.counts && x.amount > 0 && x.orderNum != null && x.orderNum == item.orderNum) tot += x.amount;
+    }
+    return round2(tot - sys.amount!);
+  }
+
+  // شريط تنبيهات صغير (ناقص / ملاحظات): التفاصيل في زر التقرير
+  Widget _alertStrip() {
+    final nm = missingTerminals.length, nw = warnings.length;
+    if (nm == 0 && nw == 0) return const SizedBox.shrink();
+    Widget chip(String label, MaterialColor c) => ActionChip(
+          label: w.Text(label, style: TextStyle(fontSize: 12, color: _tintFg(context, c))),
+          backgroundColor: _tintBg(context, c, soft: true),
+          side: BorderSide(color: _tintBorder(context, c)),
+          visualDensity: const VisualDensity(horizontal: -3, vertical: -3),
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          onPressed: openClosingReport,
+        );
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        children: [
+          if (nm > 0) chip(_l(context, '⚠️ ناقص $nm', '⚠️ Missing $nm'), Colors.amber),
+          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), Colors.orange),
+        ],
+      ),
+    );
+  }
+
+  // السطر التحتاني للكارت من غير المبلغ (المبلغ بيتعرض كبير لوحده)
+  String _subtitleSmall(ReceiptItem item) {
+    final full = subtitleOf(item);
+    if (item.ignoredDoc || item.amount <= 0) return full;
+    return full.replaceFirst(' | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م', '');
   }
 
   String subtitleOf(ReceiptItem item) {
@@ -5839,6 +5921,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final xlsx = latestOutput('.xlsx');
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
+    final reviewOnlyEff = reviewOnly && reviewCount > 0;
     _syncBadge(homeBadge, reviewCount);
     _publishClosing(processedItems, sysReads);
     homeBusyG = busy;
@@ -5904,8 +5987,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   actions: [
                     _pathAct(Icons.open_in_new, 'فتح فولدر الإخراج', 'Open output folder',
                         () => openFolder(outputDir)),
-                    _pathAct(Icons.drive_file_move, 'نقل الملفات لفولدر', 'Move files to a folder',
-                        busy ? null : transferOutputs),
                   ]),
               _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
                   busy ? null : (v) => setState(() => autoRotate = v)),
@@ -5928,70 +6009,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
             _quickBtn(Icons.picture_as_pdf, 'PDF',
                 pdf == null ? null : () => openFile(pdf, 'application/pdf')),
+            _quickBtn(Icons.drive_file_move, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs),
             _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
-            _quickBtn(Icons.fact_check, 'مراجعة ($reviewCount)', openReview),
             _quickBtn(Icons.add_photo_alternate, 'يدوي', busy ? null : pickManualImages),
           ]),
           if (processedItems.isNotEmpty) ...[
             const SizedBox(height: 4),
-            _filterRow(reviewOnly, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
+            _filterRowCompact(reviewOnlyEff, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
             _reviewTools(context,
                 hint: reviewCount > 0
                     ? _l(context, '💡 اسحب إيصال المراجعة: صح ✓ في ناحية وغلط ✗ في الناحية التانية',
                         '💡 Swipe a review receipt: OK ✓ one way, wrong ✗ the other')
                     : '',
                 count: reviewCount,
-                reviewOnly: reviewOnly,
+                reviewOnly: reviewOnlyEff,
                 busy: busy,
                 onRestOk: _markRestOk),
           ],
-          if (missingTerminals.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _tintBg(context, Colors.amber),
-                border: Border.all(color: _tintBorder(context, Colors.amber)),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: _tintFg(context, Colors.amber),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    missingTerminals
-                        .map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})')
-                        .join(' ، '),
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (warnings.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Container(
-              constraints: const BoxConstraints(maxHeight: 130),
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: SingleChildScrollView(
-                child: Text(warningsText(), style: const TextStyle(fontSize: 12)),
-              ),
-            ),
-          ],
+          _alertStrip(),
           const SizedBox(height: 10),
-          for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
+          for (final item in processedItems.where((e) => !reviewOnlyEff || e.needsReview))
             _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               shape: RoundedRectangleBorder(
@@ -6012,13 +6049,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   height: 48,
                   fit: BoxFit.cover,
                 ),
-                title: Text(
-                  item.ignoredDoc || item.ign == 'drop'
-                      ? 'مستند متجاهل - ${baseName(item.path)}'
-                      : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                title: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        item.ignoredDoc || item.ign == 'drop'
+                            ? 'مستند متجاهل - ${baseName(item.path)}'
+                            : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    if ((_sysDiffOf(item) ?? 0) != 0)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(start: 4),
+                        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(context, Colors.amber)),
+                      ),
+                  ],
                 ),
-                subtitle: Text(subtitleOf(item)),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!item.ignoredDoc && item.amount > 0)
+                      w.Text('${item.amount.toStringAsFixed(2)} ج.م',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                    w.Text(_subtitleSmall(item),
+                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                  ],
+                ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -6046,21 +6103,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const Icon(Icons.check_circle, color: Colors.green)
                     else
                       const Icon(Icons.cancel, color: Colors.red),
-                    IconButton(
-                      icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
-                      onPressed: () => editReceipt(item),
-                    ),
                     PopupMenuButton<String>(
                       tooltip: tr('المزيد'),
                       padding: EdgeInsets.zero,
                       onSelected: (v) {
-                        if (v == 'open') {
+                        if (v == 'edit') {
+                          editReceipt(item);
+                        } else if (v == 'open') {
                           openFile(item.path, 'image/*');
                         } else if (v == 'share') {
                           shareOneReceipt(item);
                         }
                       },
                       itemBuilder: (_) => [
+                        PopupMenuItem(value: 'edit', child: w.Text(_l(context, 'تعديل', 'Edit'))),
                         PopupMenuItem(value: 'open', child: w.Text(_l(context, 'فتح الصورة', 'Open image'))),
                         PopupMenuItem(value: 'share', child: w.Text(_l(context, 'إرسال الصورة', 'Send image'))),
                       ],
@@ -9579,8 +9635,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   onReset: destDir != defaultMDest && !busy ? useDefaultOut : null,
                   actions: [
                     _pathAct(Icons.open_in_new, 'فتح فولدر الإخراج', 'Open output folder', openDest),
-                    _pathAct(Icons.drive_file_move, 'نقل الملفات لفولدر', 'Move files to a folder',
-                        busy ? null : transferGood),
                   ]),
             ],
           ]),
@@ -9602,6 +9656,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 results.isEmpty ? null : openOverview),
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
+            _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
+                busy || named == 0 ? null : transferGood),
             _quickBtnG(context, Icons.bolt, 'عد متوازي',
                 (busy || chainRunning) ? null : _startCountParallel),
             _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
