@@ -779,9 +779,12 @@ class SysTotal {
   final String? date; // بنفس صيغة تاريخ الإيصالات (يوم.شهر)
   final String printed; // وقت الطباعة (لو فيه أكتر من صورة لنفس الترمنل ناخد الأحدث)
   final String file;
-  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file);
+  final int? txn; // إيصالات إلكترونية (ده الرقم اللي بنقارن بيه عدد إيصالات الدفع)
+  final int? txnAll; // إجمالي العمليات
+  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file, {this.txn, this.txnAll});
 
-  Map<String, dynamic> toJson() => {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file};
+  Map<String, dynamic> toJson() =>
+      {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file, 'tx': txn, 'ta': txnAll};
 
   static SysTotal fromJson(Map m) => SysTotal(
         m['tid'] as String?,
@@ -789,10 +792,50 @@ class SysTotal {
         m['date'] as String?,
         (m['pr'] as String?) ?? '',
         (m['f'] as String?) ?? '',
+        txn: (m['tx'] as num?)?.toInt(),
+        txnAll: (m['ta'] as num?)?.toInt(),
       );
 }
 
-SysTotal? parseSysConsole(String text, String file) {
+// أعداد صورة السيستم من مواقع الأسطر (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
+// الترتيب من فوق لتحت بعد سطر التاريخ وقبل سطر المبلغ: إجمالي العمليات، إيصالات إلكترونية، يدوية، ملغية.
+// بترجع [إجمالي العمليات، الإلكترونية] أو [null, null] لو مش متأكدين.
+List<int?> _sysCounts(RecognizedText rt) {
+  final lines = <TextLine>[for (final b in rt.blocks) ...b.lines];
+  final egpRe = RegExp(r'\d[.,]\d{2}\s*EG[PR]', caseSensitive: false);
+  double? egpTop;
+  for (final l in lines) {
+    if (egpRe.hasMatch(l.text)) {
+      final t = l.boundingBox.top;
+      if (egpTop == null || t < egpTop) egpTop = t;
+    }
+  }
+  if (egpTop == null) return [null, null];
+  final dateRe = RegExp(r'\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}');
+  double? dateBottom;
+  for (final l in lines) {
+    if (dateRe.hasMatch(l.text) && l.boundingBox.top < egpTop) {
+      final b = l.boundingBox.bottom;
+      if (dateBottom == null || b < dateBottom) dateBottom = b;
+    }
+  }
+  final numRe = RegExp(r'^[^A-Za-z\d]{0,3}(\d{1,5})[^A-Za-z\d]{0,3}$');
+  final nums = <MapEntry<double, int>>[];
+  for (final l in lines) {
+    final m = numRe.firstMatch(l.text.trim());
+    if (m == null) continue;
+    if (l.boundingBox.bottom > egpTop + 4) continue;
+    if (dateBottom != null && l.boundingBox.top < dateBottom - 4) continue;
+    nums.add(MapEntry(l.boundingBox.top, int.parse(m.group(1)!)));
+  }
+  nums.sort((a, b) => a.key.compareTo(b.key));
+  if (nums.length < 2) return [null, null];
+  final total = nums[0].value, elec = nums[1].value;
+  if (elec > total) return [null, null];
+  return [total, elec];
+}
+
+SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   final up = text.toUpperCase();
   final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
   final printedM = RegExp(
@@ -827,7 +870,8 @@ SysTotal? parseSysConsole(String text, String file) {
     final tt = t == null ? '' : t.split(':').map((e) => e.padLeft(2, '0')).join(':');
     printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
-  return SysTotal(tid, amount, date, printed, file);
+  final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
+  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1]);
 }
 
 String _fmtMoney(double v) {
@@ -932,7 +976,7 @@ ReceiptItem _receiptFromCache(Map<String, dynamic> c, String key, String path) {
   return item;
 }
 
-void _publishClosing(List<ReceiptItem> items) {
+void _publishClosing(List<ReceiptItem> items, [List<SysTotal> sys = const <SysTotal>[]]) {
   final sums = <int, int>{};
   final bad = <int>{};
   for (final it in items) {
@@ -948,6 +992,17 @@ void _publishClosing(List<ReceiptItem> items) {
   }
   for (final n in bad) {
     sums.remove(n);
+  }
+  // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
+  final latest = <String, SysTotal>{};
+  for (final sy in sys) {
+    if (sy.tid == null || sy.txn == null) continue;
+    final p = latest[sy.tid!];
+    if (p == null || sy.printed.compareTo(p.printed) > 0) latest[sy.tid!] = sy;
+  }
+  for (final e in latest.entries) {
+    final n = terminals[e.key]?.orderNum;
+    if (n != null) sums[n] = e.value.txn!;
   }
   final cur = closingTxn.value;
   var same = cur.length == sums.length;
@@ -4952,6 +5007,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return best;
   }
 
+  // تقرير التقفيل: مبالغ السيستم + الماكينات الناقصة + كل الملاحظات + الإيصالات اللي محتاجة مراجعة
+  Future<void> openClosingReport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClosingReportPage(
+          items: processedItems,
+          sysReads: sysReads,
+          missing: missingTerminals,
+          warnings: List<String>.from(warnings),
+          subtitleOf: subtitleOf,
+          onOpen: editReceipt,
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
   Widget _sysCard(BuildContext context) {
     final best = <String, SysTotal>{};
     for (final s in sysReads) {
@@ -5365,7 +5438,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         // صورة السيستم (A2R Operations Console): مش باتش، بناخد منها الترمنل والإجمالي بس
         if (ign != 'keep') {
-          final sp = parseSysConsole(res.text, baseName(f.path));
+          final sp = parseSysConsole(res.text, baseName(f.path), rt: res);
           if (sp != null) {
             sysReads.add(sp);
             _cachePut(fkey, {'k': 'console', ...sp.toJson()});
@@ -5759,7 +5832,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
     _syncBadge(homeBadge, reviewCount);
-    _publishClosing(processedItems);
+    _publishClosing(processedItems, sysReads);
     homeBusyG = busy;
     return Scaffold(
       appBar: AppBar(
@@ -5832,11 +5905,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ]),
           _runAllCard(),
           _statusBox(status),
-          if (sysReads.isNotEmpty) _sysCard(context),
           const SizedBox(height: 6),
           _statsRow(),
           const SizedBox(height: 6),
           _actionRow([
+            _quickBtn(Icons.insights, _l(context, 'التقرير', 'Report'),
+                processedItems.isEmpty && sysReads.isEmpty ? null : openClosingReport),
             _quickBtn(
                 Icons.table_chart,
                 'إكسيل',
@@ -6950,6 +7024,9 @@ void saveMOut(String? f) {
   _writeCfg(m);
 }
 
+// الفرق (في عدد الإيصالات) الأقل من الرقم ده = تحذير بس، مش مراجعة. لملفات إيصالات الدفع فقط
+const int kSoftGap = 6;
+
 class MResult {
   final String pdfName;
   String srcPath = '';
@@ -6974,6 +7051,14 @@ class MResult {
   bool get excluded => verdict < 0;
   bool get pending => count < 0 && !excluded;
   bool get ok => verdict != 0 || (idOk && cntOk);
+  // فرق بسيط (أقل من kSoftGap إيصالات، ناقص أو زيادة): الملف سليم ومش بيدخل المراجعة، بس عليه علامة تحذير ⚠️
+  bool get softWarn {
+    if (excluded || pending || verdict != 0 || !ok) return false;
+    final sl = _statsOf(this).seqLen;
+    final g = sl == null ? null : count - sl;
+    final d = _batchDiff(this);
+    return (g != null && g != 0 && g.abs() < kSoftGap) || (d != null && d != 0 && d.abs() < kSoftGap);
+  }
   String get key => '$pdfName:$size';
   List<String> get notes => [...idNotes, ...cntNotes];
 
@@ -7290,6 +7375,7 @@ _St _statusOf(MResult r) {
   if (r.excluded) return const _St('مستبعد', 'Excluded', Colors.grey);
   if (r.pending) return const _St('لسه ما اتعدّش', 'Not counted yet', Colors.blueGrey);
   if (r.verdict > 0) return const _St('اتراجع: صح', 'Reviewed: OK', Colors.green);
+  if (r.ok && r.softWarn) return const _St('سليم ⚠️ فرق بسيط', 'OK ⚠️ small difference', Colors.amber);
   if (r.ok) return const _St('سليم', 'OK', Colors.green);
   return const _St('محتاج مراجعة', 'Needs review', Colors.orange);
 }
@@ -7319,7 +7405,15 @@ String _diffText(BuildContext c, int d) => d == 0
     ? _l(c, 'مطابق ✓', 'Match ✓')
     : (d > 0 ? _l(c, 'ناقص $d', 'Missing $d') : _l(c, 'زيادة ${-d}', 'Extra ${-d}'));
 
-MaterialColor _diffColor(int d) => d == 0 ? Colors.green : (d > 0 ? Colors.red : Colors.orange);
+MaterialColor _diffColor(int d) =>
+    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : Colors.orange));
+
+// فرق الباتش بسيط (أقل من kSoftGap): تحذير أصفر بدل الأحمر
+bool _batchSoft(MResult r) {
+  if (r.verdict != 0) return false;
+  final d = _batchDiff(r);
+  return d != null && d != 0 && d.abs() < kSoftGap;
+}
 
 String _mSummary(BuildContext c, MResult r) {
   if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
@@ -7329,12 +7423,15 @@ String _mSummary(BuildContext c, MResult r) {
   final d = _batchDiff(r);
   if (bt != null && d != null) {
     final tag = _batchIsAuto(r)
-        ? _l(c, ' (من التقفيل)', ' (from closing)')
+        ? _l(c, ' (من التقفيل/السيستم)', ' (from closing/system)')
         : (_batchManual(r) != null ? _l(c, ' (يدوي)', ' (manual)') : '');
     final res = (r.verdict > 0 && d != 0)
         ? _l(c, 'راجعته يدوي: صح ✓', 'Manually reviewed: OK ✓')
         : _diffText(c, d);
     b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt$tag • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • $res');
+  }
+  if (r.softWarn) {
+    b.write('\n${_l(c, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة', '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed')}');
   }
   return b.toString();
 }
@@ -7501,7 +7598,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 child: Column(
                   children: [
                     kv(_l(context, 'الباتش', 'Batch'),
-                        '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل)', ' (from closing)') : ''}'),
+                        '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل/السيستم)', ' (from closing/system)') : ''}'),
                     kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
                     kv(
                         _l(context, 'الفرق', 'Difference'),
@@ -7624,11 +7721,12 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
     final pend = all.where((r) => r.pending).length;
     final linked = counted.where((r) => _batchOf(r) != null).toList();
     final matched = linked.where((r) => _batchMatch(r) == true).length;
-    final diffs = linked.length - matched;
+    final softN = linked.where(_batchSoft).length;
+    final diffs = linked.length - matched - softN;
     final batchSum = linked.fold<int>(0, (a, r) => a + _batchOf(r)!);
     final actualSum = linked.fold<int>(0, (a, r) => a + r.count);
     final shown = all
-        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && _batchMatch(r) == false))
+        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && _batchMatch(r) == false && !_batchSoft(r)))
         .toList();
 
     Widget stat(String label, String value, MaterialColor c) => Container(
@@ -7696,6 +7794,9 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
                     kv(_l(context, 'مطابقة', 'Matching'), '$matched', color: Colors.green),
                     kv(_l(context, 'فيها فرق', 'With a difference'), '$diffs',
                         color: diffs > 0 ? Colors.red : Colors.green),
+                    if (softN > 0)
+                      kv(_l(context, 'فرق بسيط (أقل من $kSoftGap) ⚠️', 'Small difference (under $kSoftGap) ⚠️'), '$softN',
+                          color: Colors.amber),
                     kv(_l(context, 'إجمالي الباتشات', 'Batch total'), '$batchSum'),
                     kv(_l(context, 'إجمالي الفعلي', 'Actual total'), '$actualSum'),
                     kv(_l(context, 'صافي الفرق', 'Net difference'), _diffText(context, batchSum - actualSum),
@@ -7755,6 +7856,200 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
             Padding(
               padding: const EdgeInsets.all(16),
               child: Center(child: w.Text(_l(context, 'مفيش ملفات في الفلتر ده.', 'No files in this filter.'))),
+            ),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+}
+
+class ClosingReportPage extends StatefulWidget {
+  final List<ReceiptItem> items;
+  final List<SysTotal> sysReads;
+  final List<int> missing;
+  final List<String> warnings;
+  final String Function(ReceiptItem) subtitleOf;
+  final Future<void> Function(ReceiptItem) onOpen;
+  const ClosingReportPage({
+    super.key,
+    required this.items,
+    required this.sysReads,
+    required this.missing,
+    required this.warnings,
+    required this.subtitleOf,
+    required this.onOpen,
+  });
+
+  @override
+  State<ClosingReportPage> createState() => _ClosingReportPageState();
+}
+
+class _ClosingReportPageState extends State<ClosingReportPage> {
+  @override
+  Widget build(BuildContext context) {
+    AppSettings.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final items = widget.items;
+    final counted = items.where((e) => !e.userExcluded && !e.ignoredDoc && e.ign != 'drop' && e.amount > 0).toList();
+    final total = counted.fold<double>(0, (a, e) => a + e.amount);
+    final review = items.where((e) => e.needsReview).toList();
+
+    // أحدث صورة سيستم لكل (ترمنل + تاريخ)، ومقارنتها بمجموع باتشات الماكينة
+    final best = <String, SysTotal>{};
+    for (final s in widget.sysReads) {
+      if (s.tid == null || s.amount == null) continue;
+      final k = '${s.tid}|${s.date ?? ''}';
+      final p = best[k];
+      if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
+    }
+    final sysList = best.values.toList()
+      ..sort((a, b) => (terminals[a.tid]?.orderNum ?? 999).compareTo(terminals[b.tid]?.orderNum ?? 999));
+    var sysDiffs = 0;
+    final sysRows = <Widget>[];
+    for (final s in sysList) {
+      final t = terminals[s.tid];
+      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
+      var tot = 0.0;
+      var n = 0;
+      if (t != null) {
+        for (final x in counted) {
+          if (x.counts && x.orderNum == t.orderNum) {
+            tot += x.amount;
+            n++;
+          }
+        }
+      }
+      final diff = round2(tot - s.amount!);
+      final okMatch = diff.abs() < 0.01;
+      if (!okMatch) sysDiffs++;
+      sysRows.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: w.Text(
+                  '$nm${s.date != null ? ' (${s.date})' : ''}\n${_fmtMoney(s.amount!)} ج.م${n > 1 ? ' • مجموع $n باتشات' : ''}${s.txn != null ? '\nإيصالات إلكترونية: ${s.txn}${s.txnAll != null && s.txnAll != s.txn ? ' (إجمالي العمليات ${s.txnAll})' : ''}' : ''}',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+            w.Text(okMatch ? '✅ مطابق' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: _tintFg(context, okMatch ? Colors.green : Colors.orange))),
+          ],
+        ),
+      ));
+    }
+
+    Widget stat(String label, String value, MaterialColor c) => Container(
+          width: 108,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          decoration: BoxDecoration(
+            color: _tintBg(context, c, soft: true),
+            border: Border.all(color: _tintBorder(context, c)),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Column(
+            children: [
+              w.Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _tintFg(context, c))),
+              const SizedBox(height: 2),
+              w.Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: _tintFg(context, c))),
+            ],
+          ),
+        );
+
+    Widget box(MaterialColor c, List<Widget> kids, {bool soft = false}) => Container(
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: _tintBg(context, c, soft: soft),
+            border: Border.all(color: _tintBorder(context, c)),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: kids),
+        );
+
+    return Scaffold(
+      appBar: AppBar(title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report'))),
+      body: ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              stat(_l(context, 'إيصالات', 'Receipts'), '${counted.length}', Colors.blue),
+              stat(_l(context, 'الإجمالي', 'Total'), total.toStringAsFixed(2), Colors.green),
+              stat(_l(context, 'ناقص', 'Missing'), '${widget.missing.length}',
+                  widget.missing.isNotEmpty ? Colors.amber : Colors.green),
+              stat(_l(context, 'مراجعة', 'Review'), '${review.length}',
+                  review.isNotEmpty ? Colors.orange : Colors.green),
+              stat(_l(context, 'مبالغ السيستم', 'System amounts'), '${sysList.length}', Colors.blueGrey),
+              stat(_l(context, 'فروق السيستم', 'System differences'), '$sysDiffs',
+                  sysDiffs > 0 ? Colors.red : Colors.green),
+            ],
+          ),
+          if (sysList.isNotEmpty)
+            box(Colors.blue, [
+              w.Text('🖥️ ${_l(context, 'مبالغ السيستم', 'System amounts')} (${sysList.length})',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              ...sysRows,
+            ], soft: true),
+          if (widget.missing.isNotEmpty)
+            box(Colors.amber, [
+              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} ${terminals.length}):',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.amber))),
+              const SizedBox(height: 4),
+              w.Text(
+                  widget.missing
+                      .map((n) {
+                        final tid = numToTid[n];
+                        return '$n (${tid == null ? '' : terminals[tid]?.unitName ?? ''})';
+                      })
+                      .join(' ، '),
+                  style: const TextStyle(fontSize: 13)),
+            ]),
+          if (widget.warnings.isNotEmpty)
+            box(Colors.orange, [
+              w.Text('${_l(context, 'ملاحظات للمراجعة', 'Notes for review')} (${widget.warnings.length}):',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              for (final x in widget.warnings)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: w.Text('• $x', style: const TextStyle(fontSize: 12)),
+                ),
+            ], soft: true),
+          const SizedBox(height: 10),
+          w.Text('${_l(context, 'إيصالات محتاجة مراجعة', 'Receipts needing review')} (${review.length})',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          const SizedBox(height: 4),
+          if (review.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Center(
+                  child: w.Text(_l(context, 'مفيش إيصالات محتاجة مراجعة.', 'No receipts need review.'),
+                      style: TextStyle(color: cs.onSurfaceVariant))),
+            ),
+          for (final it in review)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              child: ListTile(
+                onTap: () async {
+                  await widget.onOpen(it);
+                  if (mounted) setState(() {});
+                },
+                leading: Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
+                title: w.Text(
+                    it.ignoredDoc || it.ign == 'drop'
+                        ? 'مستند متجاهل - ${baseName(it.path)}'
+                        : 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? 'وحدة غير معروفة'}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: w.Text(widget.subtitleOf(it), style: const TextStyle(fontSize: 12)),
+              ),
             ),
           const SizedBox(height: 16),
         ],
@@ -8963,7 +9258,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
     if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
-      r.cntOk = false;
+      // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
+      if ((total - sc.rangeLen!).abs() >= kSoftGap) r.cntOk = false;
       final miss = sc.seqMissing.take(10).map((n) => n.toString().padLeft(6, '0')).join(' - ');
       r.cntNotes.add('العدد $total بس التسلسل ${sc.rangeLen}'
           '${sc.seqMissing.isNotEmpty ? '\nأرقام مش لاقيها: [ $miss ]${sc.seqMissing.length > 10 ? ' ...' : ''}' : ''}');
@@ -9078,7 +9374,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         '${col.slips > 0 ? ' • أوراق تعريف مُتجاهلة ${col.slips}' : ''}'
         ' • ⏱ ${fmtElapsed(Duration(seconds: (swAll.elapsedMilliseconds / 1000).round()))}';
     if (!sc.agree) {
-      r.cntOk = false;
+      // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
+      if ((sc.count - sc.rangeLen!).abs() >= kSoftGap) r.cntOk = false;
       r.cntNotes.add(sc.seqNote);
     }
     if (sc.otherDay.isNotEmpty) {
@@ -9311,6 +9608,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           for (final r in results.where((r) => !reviewOnly || !r.ok))
             Builder(builder: (context) {
               final match = _batchMatch(r);
+              final soft = _batchSoft(r);
               return Dismissible(
                 key: ValueKey('t_${r.key}'),
                 confirmDismiss: (dir) async {
@@ -9335,11 +9633,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                       ? _tintBg(context, Colors.grey, strong: true)
                       : (match == null
                           ? null
-                          : (match ? _tintBg(context, Colors.green) : _tintBg(context, Colors.red))),
+                          : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red)))),
                   child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12),
                     onTap: () => openReport(r),
-                    title: Text(r.newName ?? '؟ ${r.pdfName}',
+                    title: Text('${r.softWarn ? '⚠️ ' : ''}${r.newName ?? '؟ ${r.pdfName}'}',
                         style: TextStyle(
                             fontWeight: FontWeight.bold,
                             decoration: r.excluded ? TextDecoration.lineThrough : null)),
@@ -9368,7 +9666,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 filled: match != null,
                                 fillColor: match == null
                                     ? null
-                                    : (match ? _tintBg(context, Colors.green, strong: true) : _tintBg(context, Colors.red, strong: true)),
+                                    : (match ? _tintBg(context, Colors.green, strong: true) : (soft ? _tintBg(context, Colors.amber, strong: true) : _tintBg(context, Colors.red, strong: true))),
                               ),
                               onChanged: (v) {
                                 saveMState(results);
