@@ -8115,7 +8115,11 @@ Widget _flagChip(BuildContext c, String text, MaterialColor col) => Container(
 
 Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
   if (r.excluded || r.pending) {
-    return Text(r.pending && busy ? _l(c, 'بيتعدّ...', 'Counting...') : _mSummary(c, r));
+    return Text(
+        r.pending && busy
+            ? _l(c, 'بيتعدّ...', 'Counting...')
+            : (r.pending ? _l(c, 'لسه ما اتعدّش', 'Not counted yet') : _mSummary(c, r)),
+        style: TextStyle(fontSize: 12, color: Theme.of(c).colorScheme.onSurfaceVariant));
   }
   final match = _batchMatch(r);
   final soft = _batchSoft(r);
@@ -10643,7 +10647,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                       ? null
                       : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red))));
               return Dismissible(
-                key: ValueKey('t_${r.key}'),
+                key: ObjectKey(r),
                 confirmDismiss: (dir) async {
                   HapticFeedback.lightImpact();
                   setVerdict(r, dir == DismissDirection.startToEnd ? 1 : -1, toggle: false);
@@ -10673,12 +10677,25 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     decoration: BoxDecoration(
                       border: BorderDirectional(start: BorderSide(color: stripColor, width: 5)),
                     ),
-                    child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: InkWell(
                     onTap: () => openReport(r),
-                    title: _mTitle(context, r),
-                    subtitle: _mSubtitle(context, r, busy),
-                    trailing: SizedBox(
+                    child: Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
+                    child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _mTitle(context, r),
+                          const SizedBox(height: 2),
+                          _mSubtitle(context, r, busy),
+                        ],
+                      ),
+                    ),
+                    SizedBox(
                       width: 118,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -10757,7 +10774,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         ],
                       ),
                     ),
-                  ),
+                    ],
+                    ),
+                    ),
+                    ),
                   ),
                   ),
                 ),
