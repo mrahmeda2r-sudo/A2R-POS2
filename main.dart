@@ -210,6 +210,224 @@ Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
   );
 }
 
+// ───────── شرائح المصدر / الفترة / الإخراج (بدل القسم القابل للفتح) ─────────
+// كل شريحة بتفتح قايمة سفلية. مستخدمة في تاب التقفيل وتاب إيصالات الدفع.
+Future<void> _sheet(BuildContext context, String title, List<Widget> children) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (c) => SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            ...children,
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+Widget _choiceTile(BuildContext c, {required bool selected, required String title, String? subtitle, required VoidCallback onTap, IconData? icon}) {
+  final cs = Theme.of(c).colorScheme;
+  return ListTile(
+    leading: Icon(selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+        color: selected ? cs.primary : cs.onSurfaceVariant),
+    title: Row(children: [
+      if (icon != null) ...[Icon(icon, size: 18), const SizedBox(width: 6)],
+      Flexible(child: Text(title)),
+    ]),
+    subtitle: subtitle == null
+        ? null
+        : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis, textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+    onTap: onTap,
+  );
+}
+
+Widget _sourceChips(
+  BuildContext context, {
+  required bool busy,
+  required int days,
+  required void Function(int) onDays,
+  required String periodLabel,
+  required String? sourcePath, // null = واتساب (تلقائي)
+  required VoidCallback onPickSource,
+  required VoidCallback onUseWhatsApp,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  final customSrc = sourcePath != null;
+
+  Widget chip(IconData icon, String label, bool highlight, VoidCallback onTap) => ActionChip(
+        avatar: Icon(icon, size: 18),
+        label: Row(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13))),
+          const SizedBox(width: 2),
+          const Icon(Icons.arrow_drop_down, size: 18),
+        ]),
+        backgroundColor: highlight ? cs.secondaryContainer : null,
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        onPressed: busy ? null : onTap,
+      );
+
+  void srcSheet() => _sheet(context, _l(context, 'المصدر', 'Source'), [
+        Builder(builder: (c) => _choiceTile(c,
+            selected: !customSrc,
+            icon: Icons.chat,
+            title: _l(c, 'واتساب (تلقائي)', 'WhatsApp (auto)'),
+            onTap: () {
+              Navigator.pop(c);
+              if (customSrc) onUseWhatsApp();
+            })),
+        Builder(builder: (c) => _choiceTile(c,
+            selected: customSrc,
+            icon: Icons.folder_open,
+            title: customSrc ? _l(c, 'فولدر تاني', 'Another folder') : _l(c, 'فولدر تاني…', 'Another folder…'),
+            subtitle: sourcePath,
+            onTap: () {
+              Navigator.pop(c);
+              onPickSource();
+            })),
+      ]);
+
+  void periodSheet() => _sheet(context, _l(context, 'الفترة', 'Period'), [
+        for (final o in const [
+          [0, 'اليوم', 'Today'],
+          [1, 'يومين', '2 days'],
+          [2, '3 أيام', '3 days'],
+          [-1, 'الكل', 'All'],
+        ])
+          Builder(builder: (c) => _choiceTile(c,
+              selected: days == o[0],
+              title: _l(c, o[1] as String, o[2] as String),
+              onTap: () {
+                Navigator.pop(c);
+                onDays(o[0] as int);
+              })),
+      ]);
+
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Wrap(
+      spacing: 6,
+      runSpacing: 0,
+      children: [
+        chip(customSrc ? Icons.folder_open : Icons.chat, customSrc ? baseName(sourcePath!) : _l(context, 'واتساب', 'WhatsApp'), customSrc, srcSheet),
+        chip(Icons.date_range, periodLabel, false, periodSheet),
+      ],
+    ),
+  );
+}
+
+// كارت فولدر الإخراج: أيقونة ملوّنة + اسم الفولدر + شارة "افتراضي" + زر فتح
+Widget _outputCard(
+  BuildContext context, {
+  required bool busy,
+  required String outPath,
+  required bool outIsDefault,
+  required VoidCallback onPickOut,
+  required VoidCallback onUseDefaultOut,
+  required VoidCallback onOpenOut,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  void outSheet() => _sheet(context, _l(context, 'فولدر الإخراج', 'Output folder'), [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: SelectableText(outPath, textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+        ),
+        Builder(builder: (c) => ListTile(
+              leading: const Icon(Icons.edit_location_alt_outlined),
+              title: Text(_l(c, 'تغيير الفولدر', 'Change folder')),
+              onTap: () {
+                Navigator.pop(c);
+                onPickOut();
+              },
+            )),
+        if (!outIsDefault)
+          Builder(builder: (c) => ListTile(
+                leading: const Icon(Icons.settings_backup_restore),
+                title: Text(_l(c, 'رجوع للفولدر الافتراضي', 'Back to default folder')),
+                onTap: () {
+                  Navigator.pop(c);
+                  onUseDefaultOut();
+                },
+              )),
+      ]);
+  return Card(
+    margin: const EdgeInsets.only(top: 2, bottom: 4),
+    elevation: 0,
+    color: cs.surfaceContainerHighest.withAlpha(110),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: busy ? null : outSheet,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: cs.primaryContainer,
+              child: Icon(Icons.drive_file_move_outline, size: 20, color: cs.onPrimaryContainer),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_l(context, 'فولدر الإخراج', 'Output folder'),
+                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                  Row(children: [
+                    Flexible(
+                      child: Text(baseName(outPath),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textDirection: TextDirection.ltr,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                    ),
+                    if (outIsDefault) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: _tintBg(context, Colors.green),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(_l(context, 'افتراضي', 'Default'),
+                            style: TextStyle(fontSize: 10, color: _tintFg(context, Colors.green))),
+                      ),
+                    ],
+                  ]),
+                ],
+              ),
+            ),
+            IconButton.filledTonal(
+              tooltip: _l(context, 'فتح الفولدر', 'Open folder'),
+              icon: const Icon(Icons.open_in_new, size: 18),
+              visualDensity: VisualDensity.compact,
+              onPressed: busy ? null : onOpenOut,
+            ),
+            const SizedBox(width: 2),
+            TextButton(
+              onPressed: busy ? null : outSheet,
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+              child: Text(_l(context, 'تغيير', 'Change')),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 Widget _settingsCard(List<Widget> children) => Card(
       margin: const EdgeInsets.only(bottom: 6),
       child: Padding(
@@ -234,7 +452,17 @@ Widget _statusBox(String text) => Builder(
           color: Theme.of(c).colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text(text, style: const TextStyle(fontSize: 13)),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(Icons.info_outline, size: 16, color: Theme.of(c).colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+          ],
+        ),
       ),
     );
 
@@ -376,12 +604,13 @@ Widget _scanBar({
               : step == 2
                   ? ' • الملفات (2 من 2)'
                   : '';
+          final pct = (progress != null && progress > 0) ? ' • ${(progress * 100).round()}%' : '';
           child = FilledButton.icon(
             onPressed: stopReq ? null : onStop,
             style: FilledButton.styleFrom(
                 backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
             icon: const Icon(Icons.stop),
-            label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt'),
+            label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt$pct'),
           );
         } else {
           child = Row(
@@ -465,7 +694,9 @@ Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallbac
             child: Icon(icon, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
           ),
           const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 12)),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 12, color: onTap == null ? Theme.of(context).disabledColor : null)),
         ],
       ),
     ),
@@ -997,6 +1228,7 @@ void _publishClosing(List<ReceiptItem> items, [List<SysTotal> sys = const <SysTo
   for (final n in bad) {
     sums.remove(n);
   }
+  batchTxnByNum = Map<int, int>.from(sums);
   // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
   final latest = <String, SysTotal>{};
   for (final sy in sys) {
@@ -1175,6 +1407,7 @@ Future<void> wipeEverything(BuildContext context) async {
   await clearScanCache();
   closingTxn.value = <int, int>{};
   sysTxnByNum = <int, int>{};
+  batchTxnByNum = <int, int>{};
   wipeSignal.value++;
   final mb = (bytes / 1048576).toStringAsFixed(1);
   m.showSnackBar(SnackBar(
@@ -4107,26 +4340,35 @@ String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : 
 Widget _statCard(IconData icon, String label, String value, Color c,
         {VoidCallback? onTap, bool compact = false}) =>
     Expanded(
-      child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 2),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8, horizontal: 4),
-            child: Column(
-              children: [
-                Icon(icon, size: compact ? 16 : 18, color: c),
-                const SizedBox(height: 1),
-                FittedBox(
-                    child: w.Text(value,
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: compact ? 14 : 15))),
-                Text(label, style: TextStyle(fontSize: compact ? 10.5 : 11)),
-              ],
+      child: Builder(builder: (ctx) {
+        final dim = value == '0';
+        final cs = Theme.of(ctx).colorScheme;
+        final ic = dim ? cs.onSurfaceVariant.withAlpha(120) : c;
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          clipBehavior: Clip.antiAlias,
+          color: dim ? null : c.withAlpha(_isDark(ctx) ? 40 : 28),
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8, horizontal: 4),
+              child: Column(
+                children: [
+                  Icon(icon, size: compact ? 16 : 18, color: ic),
+                  const SizedBox(height: 1),
+                  FittedBox(
+                      child: w.Text(value,
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: compact ? 14 : 15,
+                              color: dim ? cs.onSurfaceVariant.withAlpha(160) : null))),
+                  Text(label, style: TextStyle(fontSize: compact ? 10.5 : 11, color: cs.onSurfaceVariant)),
+                ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      }),
     );
 
 // فلتر مضغوط (شيبس صغيرة على نفس سطر "عرض"). شيب المراجعة رمادي لو مفيش مراجعة
@@ -4193,6 +4435,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
   bool reviewOnly = false;
+  String _q = '';
+  int _sort = 0;
+  final TextEditingController _searchCtl = TextEditingController();
   bool stopReq = false;
   bool autoScan = false;
   bool settingsOpen = false;
@@ -4310,6 +4555,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       key: ValueKey('sw_${item.path}_${item.userExcluded}_${item.ok}'),
       direction: DismissDirection.horizontal,
       confirmDismiss: (dir) async {
+        HapticFeedback.lightImpact();
         await _onSwipe(item, dir == DismissDirection.startToEnd);
         return false;
       },
@@ -5120,6 +5366,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // شريط تنبيهات صغير (ناقص / ملاحظات): التفاصيل في زر التقرير
+  List<ReceiptItem> _visibleItems(bool reviewOnlyEff) {
+    var l = processedItems.where((e) => !reviewOnlyEff || e.needsReview).toList();
+    final q = _q.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      l = l
+          .where((e) => [e.unitName ?? '', '${e.orderNum ?? ''}', e.tid ?? '', e.amount.toStringAsFixed(2), baseName(e.path)]
+              .any((t) => t.toLowerCase().contains(q)))
+          .toList();
+    }
+    switch (_sort) {
+      case 1:
+        _stableSort<ReceiptItem>(l, (a, b) => (a.orderNum ?? 999).compareTo(b.orderNum ?? 999));
+        break;
+      case 2:
+        _stableSort<ReceiptItem>(l, (a, b) => (b.needsReview ? 1 : 0).compareTo(a.needsReview ? 1 : 0));
+        break;
+      case 3:
+        _stableSort<ReceiptItem>(l, (a, b) => b.amount.compareTo(a.amount));
+        break;
+    }
+    return l;
+  }
+
   Widget _alertStrip() {
     final nm = missingTerminals.length, nw = warnings.length;
     if (nm == 0 && nw == 0) return const SizedBox.shrink();
@@ -5145,13 +5414,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // السطر التحتاني للكارت من غير المبلغ (المبلغ بيتعرض كبير لوحده)
+  // التحذيرات كشارات صغيرة ملونة بدل سطور نص طويلة (التفاصيل الكاملة في شاشة التقرير)
+  Widget _warnChips(ReceiptItem item) {
+    final chips = <Widget>[];
+    void add(String t, MaterialColor c) => chips.add(_flagChip(context, t, c));
+    if (item.reprintSummary) add('🚨 REPRINT / SUMMARY', Colors.red);
+    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', Colors.orange);
+    if (item.ignoredDoc) add('📄 مستند متجاهل - راجعه', Colors.grey);
+    if (item.dupSuspect) {
+      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', Colors.orange);
+    } else if (item.userExcluded) {
+      add('🚫 مستبعد (مكرر)', Colors.grey);
+    }
+    if (item.alt != null) add('⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}', Colors.amber);
+    if (item.dateOdd) add('📅 تاريخ ${item.date} (الأغلب ${item.dateMain})', Colors.amber);
+    if (!item.ignoredDoc && !item.userExcluded && !item.dupSuspect && item.weakId && item.row != null) {
+      add('❓ ماكينة تلقائية - اتأكد', Colors.blue);
+    }
+    if (item.unusual != null) add('📊 ${item.unusual}', Colors.blue);
+    if (chips.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(spacing: 6, runSpacing: 4, children: chips),
+    );
+  }
+
   String _subtitleSmall(ReceiptItem item) {
-    final full = subtitleOf(item);
+    final full = subtitleOf(item, flags: false);
     if (item.ignoredDoc || item.amount <= 0) return full;
     return full.replaceFirst(' | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م', '');
   }
 
-  String subtitleOf(ReceiptItem item) {
+  String subtitleOf(ReceiptItem item, {bool flags = true}) {
     final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
     final bt = item.batches.length > 1
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
@@ -5195,7 +5489,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : item.userExcluded
             ? '\n🚫 مستبعد (مكرر)'
             : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$sysStr$alt$dup$unu$extra';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$sysStr${flags ? '$alt$dup$unu$extra' : ''}';
   }
 
   String warningsText() {
@@ -5922,6 +6216,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
     final reviewOnlyEff = reviewOnly && reviewCount > 0;
+    final visItems = _visibleItems(reviewOnlyEff);
     _syncBadge(homeBadge, reviewCount);
     _publishClosing(processedItems, sysReads);
     homeBusyG = busy;
@@ -5952,45 +6247,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _settingsCard([
             _switchRow('فحص تلقائي (بيراقب الإيصالات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
             const Divider(height: 4),
-            InkWell(
-              onTap: () => setState(() => settingsOpen = !settingsOpen),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    const Icon(Icons.tune, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                          'إعدادات المصدر • ${_periodLabel()} • ${customDir == null ? 'واتساب' : baseName(customDir!)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13)),
-                    ),
-                    Icon(settingsOpen ? Icons.expand_less : Icons.expand_more),
-                  ],
-                ),
-              ),
-            ),
-            if (settingsOpen) ...[
-              _periodRow(days, busy, (d) {
-                setState(() => days = d);
-                sharedDays.value = d;
-              }),
-              const Divider(height: 10),
-              _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
-                  busy ? null : pickFolder,
-                  onReset: customDir != null && !busy ? useWhatsApp : null),
-              _pathRow(Icons.drive_file_move_outline, 'الإخراج',
-                  customOut ?? '$defaultOutputDir (افتراضي)', busy ? null : pickOutFolder,
-                  onReset: customOut != null && !busy ? useDefaultOut : null,
-                  actions: [
-                    _pathAct(Icons.open_in_new, 'فتح فولدر الإخراج', 'Open output folder',
-                        () => openFolder(outputDir)),
-                  ]),
-              _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
-                  busy ? null : (v) => setState(() => autoRotate = v)),
-            ],
+            _sourceChips(context,
+                busy: busy,
+                days: days,
+                onDays: (d) {
+                  setState(() => days = d);
+                  sharedDays.value = d;
+                },
+                periodLabel: _periodLabel(),
+                sourcePath: customDir,
+                onPickSource: pickFolder,
+                onUseWhatsApp: useWhatsApp),
+            _outputCard(context,
+                busy: busy,
+                outPath: customOut ?? defaultOutputDir,
+                outIsDefault: customOut == null,
+                onPickOut: pickOutFolder,
+                onUseDefaultOut: useDefaultOut,
+                onOpenOut: () => openFolder(outputDir)),
+            _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
+                busy ? null : (v) => setState(() => autoRotate = v)),
           ]),
           _runAllCard(),
           _statusBox(status),
@@ -6025,23 +6301,53 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 reviewOnly: reviewOnlyEff,
                 busy: busy,
                 onRestOk: _markRestOk),
+            _listTools(context,
+                remaining: reviewCount,
+                total: processedItems.length,
+                controller: _searchCtl,
+                onQuery: (v) => setState(() => _q = v),
+                sort: _sort,
+                sortLabels: [
+                  _l(context, 'الترتيب الأصلي', 'Original order'),
+                  _l(context, 'رقم الماكينة', 'Machine number'),
+                  _l(context, 'المراجعة أولاً', 'Review first'),
+                  _l(context, 'المبلغ الأكبر', 'Largest amount'),
+                ],
+                onSort: (v) => setState(() => _sort = v)),
           ],
           _alertStrip(),
           const SizedBox(height: 10),
-          for (final item in processedItems.where((e) => !reviewOnlyEff || e.needsReview))
+          if (processedItems.isEmpty && busy) const _SkeletonList(),
+          if (processedItems.isEmpty && !busy)
+            _emptyState(context, Icons.receipt_long, _l(context, 'مفيش إيصالات لسه', 'No receipts yet'),
+                _l(context, 'اضغط "فحص التقفيل" علشان نقرا الباتشات وصور السيستم.',
+                    'Tap "Scan closing" to read the batches and system images.'),
+                actionLabel: _l(context, 'فحص التقفيل', 'Scan closing'), onAction: () => runFullPipeline()),
+          if (processedItems.isNotEmpty && visItems.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(child: w.Text(_l(context, 'مفيش نتايج.', 'No results.'))),
+            ),
+          for (final item in visItems)
             _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
                 side: BorderSide(
-                  color: item.reprintSummary 
-                      ? Colors.red 
-                      : (item.missingBatchClosed ? Colors.orange : _unitColor(item.row)), 
-                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.5)
+                  color: item.reprintSummary
+                      ? Colors.red
+                      : (item.missingBatchClosed ? Colors.orange : Theme.of(context).colorScheme.outlineVariant),
+                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.0),
                 ),
               ),
+              clipBehavior: Clip.antiAlias,
               color: item.reprintSummary ? _tintBg(context, Colors.red, soft: true) : null,
-              child: ListTile(
+              child: AnimatedContainer(
+               duration: const Duration(milliseconds: 350),
+               decoration: BoxDecoration(
+                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 5)),
+               ),
+               child: ListTile(
                 onTap: () => editReceipt(item),
                 leading: Image.file(
                   File(item.path),
@@ -6051,6 +6357,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 title: Row(
                   children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      margin: const EdgeInsetsDirectional.only(end: 8),
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: _unitColor(item.row)),
+                    ),
                     Flexible(
                       child: Text(
                         item.ignoredDoc || item.ign == 'drop'
@@ -6059,6 +6371,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
+                    if (item.needsReview)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(start: 6),
+                        child: Icon(Icons.swipe, size: 14, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      ),
                     if ((_sysDiffOf(item) ?? 0) != 0)
                       Padding(
                         padding: const EdgeInsetsDirectional.only(start: 4),
@@ -6074,6 +6391,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
                     w.Text(_subtitleSmall(item),
                         style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    _warnChips(item),
                   ],
                 ),
                 trailing: Row(
@@ -6124,6 +6442,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
+              ),
             )),
           const SizedBox(height: 64),
         ],
@@ -6141,15 +6460,51 @@ class FolderPicker extends StatefulWidget {
   State<FolderPicker> createState() => _FolderPickerState();
 }
 
+String? _lastPickedFolder; // آخر فولدر اتختار (في الجلسة دي)
+
 class _FolderPickerState extends State<FolderPicker> {
   late String path = widget.start;
   List<Directory> dirs = [];
   String? error;
+  String q = '';
+  final TextEditingController _search = TextEditingController();
+  final ScrollController _crumbs = ScrollController();
+  final List<List<Object>> shortcuts = []; // [أيقونة، اسم، مسار]
 
   @override
   void initState() {
     super.initState();
     load();
+    _buildShortcuts();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    _crumbs.dispose();
+    super.dispose();
+  }
+
+  void _buildShortcuts() {
+    void add(IconData ic, String name, String p) {
+      try {
+        if (Directory(p).existsSync() && !shortcuts.any((e) => e[2] == p)) shortcuts.add([ic, name, p]);
+      } catch (_) {}
+    }
+
+    try {
+      for (final d in findWhatsAppDocDirs()) {
+        add(Icons.chat, 'واتساب - مستندات', d.path);
+        break;
+      }
+      for (final d in findWhatsAppImageDirs()) {
+        add(Icons.photo_library_outlined, 'واتساب - صور', d.path);
+        break;
+      }
+    } catch (_) {}
+    add(Icons.download, 'Download', '$root/Download');
+    add(Icons.description_outlined, 'Documents', '$root/Documents');
+    if (_lastPickedFolder != null) add(Icons.history, 'آخر اختيار', _lastPickedFolder!);
   }
 
   void load() {
@@ -6169,55 +6524,205 @@ class _FolderPickerState extends State<FolderPicker> {
     }
   }
 
-  void go(String p) => setState(() {
-        path = p;
-        load();
-      });
+  void go(String p) {
+    setState(() {
+      path = p;
+      q = '';
+      _search.clear();
+      load();
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_crumbs.hasClients) _crumbs.jumpTo(_crumbs.position.maxScrollExtent);
+    });
+  }
+
+  List<List<String>> _crumbList() {
+    final out = <List<String>>[];
+    var base = '';
+    var rest = path;
+    if (path == root || path.startsWith('$root/')) {
+      out.add(['الذاكرة', root]);
+      base = root;
+      rest = path.substring(root.length);
+    }
+    var cur = base;
+    for (final seg in rest.split('/').where((e) => e.isNotEmpty)) {
+      cur = '$cur/$seg';
+      out.add([seg, cur]);
+    }
+    if (out.isEmpty) out.add(['/', '/']);
+    return out;
+  }
+
+  Future<void> _newFolder() async {
+    final ctl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('فولدر جديد'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'اسم الفولدر'),
+          onSubmitted: (v) => Navigator.pop(c, v),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(c, ctl.text), child: const Text('إنشاء')),
+        ],
+      ),
+    );
+    final n = name?.trim() ?? '';
+    if (n.isEmpty || n.contains('/')) return;
+    try {
+      Directory('$path/$n').createSync();
+      go('$path/$n');
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: w.Text('مش قادر أعمل الفولدر ده هنا.')));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final canUp = path.length > root.length;
+    final shown = q.trim().isEmpty
+        ? dirs
+        : dirs.where((d) => baseName(d.path).toLowerCase().contains(q.trim().toLowerCase())).toList();
+    final crumbs = _crumbList();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_crumbs.hasClients) _crumbs.jumpTo(_crumbs.position.maxScrollExtent);
+    });
     return Scaffold(
-      appBar: AppBar(title: const Text('اختيار فولدر')),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(path, textDirection: TextDirection.ltr),
+      appBar: AppBar(
+        title: const Text('اختيار فولدر'),
+        actions: [
+          IconButton(
+            tooltip: 'فولدر جديد',
+            icon: const Icon(Icons.create_new_folder_outlined),
+            onPressed: _newFolder,
+          ),
+        ],
+      ),
+      bottomNavigationBar: Material(
+        elevation: 8,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: FilledButton.icon(
+              onPressed: () {
+                _lastPickedFolder = path;
+                Navigator.pop(context, path);
+              },
+              icon: const Icon(Icons.check),
+              label: w.Text('اختيار "${baseName(path)}"', maxLines: 1, overflow: TextOverflow.ellipsis),
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 50), textStyle: const TextStyle(fontSize: 16)),
             ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Text(error!),
-              ),
-            Expanded(
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          // مسار قابل للضغط (breadcrumb)
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: SizedBox(
+              height: 44,
               child: ListView(
+                controller: _crumbs,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 children: [
-                  if (canUp)
-                    ListTile(
-                      leading: const Icon(Icons.arrow_upward),
-                      title: const Text('..'),
-                      onTap: () => go(Directory(path).parent.path),
+                  for (var i = 0; i < crumbs.length; i++) ...[
+                    if (i > 0) Icon(Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
+                    Center(
+                      child: ActionChip(
+                        label: w.Text(crumbs[i][0], style: const TextStyle(fontSize: 13)),
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: i == crumbs.length - 1 ? cs.primaryContainer : null,
+                        onPressed: i == crumbs.length - 1 ? null : () => go(crumbs[i][1]),
+                      ),
                     ),
-                  for (final d in dirs)
-                    ListTile(
-                      leading: const Icon(Icons.folder),
-                      title: Text(baseName(d.path), textDirection: TextDirection.ltr),
-                      onTap: () => go(d.path),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          if (shortcuts.isNotEmpty)
+            SizedBox(
+              height: 42,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                children: [
+                  for (final sc in shortcuts)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(end: 6),
+                      child: ActionChip(
+                        avatar: Icon(sc[0] as IconData, size: 18),
+                        label: w.Text(sc[1] as String, style: const TextStyle(fontSize: 13)),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => go(sc[2] as String),
+                      ),
                     ),
                 ],
               ),
             ),
+          if (dirs.length > 6 || q.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.all(12),
-              child: FilledButton(
-                onPressed: () => Navigator.pop(context, path),
-                child: const Text('اختيار هذا الفولدر'),
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+              child: SizedBox(
+                height: 40,
+                child: TextField(
+                  controller: _search,
+                  onChanged: (v) => setState(() => q = v),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'بحث في الفولدرات',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+                  ),
+                ),
               ),
             ),
-          ],
-        ),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: w.Text(error!, style: TextStyle(color: cs.error)),
+            ),
+          Expanded(
+            child: ListView(
+              children: [
+                if (canUp)
+                  ListTile(
+                    leading: const Icon(Icons.arrow_upward),
+                    title: const Text('..'),
+                    onTap: () => go(Directory(path).parent.path),
+                  ),
+                for (final d in shown)
+                  ListTile(
+                    leading: const Icon(Icons.folder),
+                    title: Text(baseName(d.path), textDirection: TextDirection.ltr),
+                    onTap: () => go(d.path),
+                  ),
+                if (shown.isEmpty && error == null)
+                  Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(children: [
+                      Icon(Icons.folder_open, size: 48, color: cs.onSurfaceVariant),
+                      const SizedBox(height: 8),
+                      w.Text(q.isEmpty ? 'مفيش فولدرات جوه الفولدر ده' : 'مفيش نتايج للبحث',
+                          style: TextStyle(color: cs.onSurfaceVariant)),
+                    ]),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -7090,6 +7595,7 @@ void saveMOut(String? f) {
 
 // عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
 Map<int, int> sysTxnByNum = <int, int>{};
+Map<int, int> batchTxnByNum = <int, int>{}; // رقم الماكينة -> عدد الباتش فقط (من غير السيستم)
 
 // لو عدد الـ PDF = عدد السيستم (إلكترونية): ملاحظة التسلسل (RRN) متتحسبش مراجعة. ده القرار الوحيد اللي السيستم بيحسمه
 bool _sysCntMatch(MResult r) {
@@ -7495,23 +8001,388 @@ bool _batchSoft(MResult r) {
 String _mSummary(BuildContext c, MResult r) {
   if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
   if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط بدء العد)', 'Not counted yet (tap Start counting)');
-  final b = StringBuffer('${_l(c, 'عدد المعاملات', 'Transactions')}: ${r.count}');
-  final bt = _batchOf(r);
-  final d = _batchDiff(r);
-  if (bt != null && d != null) {
-    final tag = _batchIsAuto(r)
-        ? _l(c, ' (من التقفيل/السيستم)', ' (from closing/system)')
-        : (_batchManual(r) != null ? _l(c, ' (يدوي)', ' (manual)') : '');
-    final res = (r.verdict > 0 && d != 0)
-        ? _l(c, 'راجعته يدوي: صح ✓', 'Manually reviewed: OK ✓')
-        : _diffText(c, d);
-    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt$tag • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • $res');
-  }
-  if (r.softWarn) {
-    b.write('\n${_l(c, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة', '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed')}');
-  }
-  return b.toString();
+  // الأرقام دايماً إنجليزي (Dart بيكتب الأرقام ASCII حتى لو الواجهة عربي)
+  final manual = _batchManual(r);
+  final n = r.orderNum;
+  final batch = manual ?? (n == null ? null : batchTxnByNum[n]);
+  final sys = n == null ? null : sysTxnByNum[n];
+  String v(int? x) => x == null ? '—' : '$x';
+  // ملاحظة: رسالة "فرق بسيط - سليم" بقت بتظهر جوه تفاصيل الكارت بس
+  return '${_l(c, 'عدد الإيصالات', 'Receipts')}: ${r.count}\n'
+      '${_l(c, 'الباتش', 'Batch')}: ${v(batch)}\n'
+      '${_l(c, 'السيستم', 'System')}: ${v(sys)}';
 }
+
+// ───────── كارت الماكينة (تاب إيصالات الدفع): مربعات أرقام + شارات ─────────
+int? _mBatchShown(MResult r) {
+  final manual = _batchManual(r);
+  final n = r.orderNum;
+  return manual ?? (n == null ? null : batchTxnByNum[n]);
+}
+
+int? _mSysShown(MResult r) => r.orderNum == null ? null : sysTxnByNum[r.orderNum!];
+
+class _MName {
+  final String order, unit, date;
+  final String? idx;
+  const _MName(this.order, this.unit, this.idx, this.date);
+}
+
+// اسم الملف: رقم.الوحدة[.ترتيب].يوم.يوم.شهر  ←  بنفصله علشان نعرضه على سطرين
+_MName? _splitMName(String? name) {
+  if (name == null) return null;
+  final parts = name.split('.');
+  final di = parts.lastIndexOf('يوم');
+  if (di < 2 || parts.length - di < 3) return null;
+  var head = parts.sublist(1, di);
+  String? idx;
+  if (head.length >= 2 && RegExp(r'^\d+$').hasMatch(head.last)) {
+    idx = head.last;
+    head = head.sublist(0, head.length - 1);
+  }
+  return _MName(parts.first, head.join(' '), idx, '${parts[di + 1]}.${parts[di + 2]}');
+}
+
+Widget _mTitle(BuildContext c, MResult r) {
+  final n = _splitMName(r.newName);
+  final cs = Theme.of(c).colorScheme;
+  final main = n == null ? (r.newName ?? '؟ ${r.pdfName}') : '${n.unit}${n.idx != null ? ' ${n.idx}' : ''}';
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(children: [
+        if (r.softWarn)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: 4),
+            child: Icon(Icons.warning_amber, size: 18, color: _tintBorder(c, Colors.amber)),
+          ),
+        Flexible(
+          child: Text(main,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  decoration: r.excluded ? TextDecoration.lineThrough : null)),
+        ),
+        if (!r.ok && !r.excluded)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 6),
+            child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
+          ),
+      ]),
+      if (n != null)
+        Text('${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
+            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+    ],
+  );
+}
+
+Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone) {
+  final cs = Theme.of(c).colorScheme;
+  return Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+      decoration: BoxDecoration(
+        color: tone == null ? cs.surfaceContainerHighest.withAlpha(120) : _tintBg(c, tone),
+        borderRadius: BorderRadius.circular(8),
+        border: tone == null ? null : Border.all(color: _tintBorder(c, tone), width: 0.8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(value,
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
+          Text(label, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+        ],
+      ),
+    ),
+  );
+}
+
+// شارة تحذير صغيرة (بدل سطور النص الطويلة)
+Widget _flagChip(BuildContext c, String text, MaterialColor col) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: _tintBg(c, col),
+        border: Border.all(color: _tintBorder(c, col), width: 0.8),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(text,
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _tintFg(c, col))),
+    );
+
+Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
+  if (r.excluded || r.pending) {
+    return Text(r.pending && busy ? _l(c, 'بيتعدّ...', 'Counting...') : _mSummary(c, r));
+  }
+  final match = _batchMatch(r);
+  final soft = _batchSoft(r);
+  final batch = _mBatchShown(r);
+  final sys = _mSysShown(r);
+  String v(int? x) => x == null ? '—' : '$x';
+  MaterialColor? gap(int? x) {
+    if (r.verdict > 0 || x == null || x == r.count) return null;
+    return (x - r.count).abs() < kSoftGap ? Colors.amber : Colors.red;
+  }
+
+  final MaterialColor? cTone = r.verdict > 0
+      ? Colors.green
+      : (match == null ? null : (match ? Colors.green : (soft ? Colors.amber : Colors.red)));
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(children: [
+          _statBox(c, _l(c, 'الإيصالات', 'Receipts'), '${r.count}', cTone),
+          const SizedBox(width: 6),
+          _statBox(c, _l(c, 'الباتش', 'Batch'), v(batch), gap(batch)),
+          const SizedBox(width: 6),
+          _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
+        ]),
+      ),
+      if (r.verdict > 0 || r.notes.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Wrap(spacing: 6, runSpacing: 4, children: [
+            if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
+            if (r.notes.isNotEmpty)
+              _flagChip(c, _l(c, '⚠️ ${r.notes.length} ملاحظة', '⚠️ ${r.notes.length} note(s)'), Colors.orange),
+          ]),
+        ),
+    ],
+  );
+}
+
+Color _mStripColor(MResult r) {
+  if (r.excluded) return Colors.grey;
+  if (r.pending) return Colors.blueGrey;
+  final m = _batchMatch(r);
+  if (r.verdict > 0 || m == true) return Colors.green;
+  if (m == false) return _batchSoft(r) ? Colors.amber : Colors.red;
+  return r.ok ? Colors.green : Colors.orange;
+}
+
+Color _itemStatusColor(ReceiptItem i) {
+  if (i.reprintSummary) return Colors.red;
+  if (i.needsReview) return Colors.orange;
+  if (i.ignoredDoc || i.ign == 'drop' || i.userExcluded) return Colors.grey;
+  if (i.tid != null && i.amount > 0) return Colors.green;
+  return Colors.red;
+}
+
+// ───────── أدوات القوائم: عدّاد المراجعة + بحث + ترتيب + حالة فاضية + هيكل تحميل ─────────
+void _stableSort<T>(List<T> l, int Function(T, T) cmp) {
+  final idx = <T, int>{for (var i = 0; i < l.length; i++) l[i]: i};
+  l.sort((a, b) {
+    final c = cmp(a, b);
+    return c != 0 ? c : idx[a]!.compareTo(idx[b]!);
+  });
+}
+
+Widget _listTools(
+  BuildContext context, {
+  required int remaining,
+  required int total,
+  required TextEditingController controller,
+  required void Function(String) onQuery,
+  required int sort,
+  required List<String> sortLabels,
+  required void Function(int) onSort,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  final done = total - remaining;
+  final allOk = remaining == 0;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (total > 0)
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(children: [
+                Expanded(
+                  child: w.Text(
+                      allOk
+                          ? _l(context, '✅ كله تمام - مفيش حاجة للمراجعة', '✅ All good - nothing to review')
+                          : _l(context, 'فاضل $remaining للمراجعة من $total', '$remaining left to review of $total'),
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, Colors.orange))),
+                ),
+                w.Text('${(done * 100 / total).round()}%',
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              ]),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: done / total,
+                  minHeight: 6,
+                  color: allOk ? Colors.green : Colors.orange,
+                ),
+              ),
+            ],
+          ),
+        ),
+      Row(children: [
+        Expanded(
+          child: SizedBox(
+            height: 40,
+            child: TextField(
+              controller: controller,
+              onChanged: onQuery,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: _l(context, 'بحث: وحدة / رقم ماكينة / مبلغ', 'Search: unit / machine / amount'),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: controller.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          controller.clear();
+                          onQuery('');
+                        },
+                      ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+              ),
+            ),
+          ),
+        ),
+        PopupMenuButton<int>(
+          tooltip: _l(context, 'ترتيب', 'Sort'),
+          icon: Icon(Icons.sort, color: sort == 0 ? null : cs.primary),
+          onSelected: onSort,
+          itemBuilder: (_) => [
+            for (var i = 0; i < sortLabels.length; i++)
+              CheckedPopupMenuItem<int>(value: i, checked: sort == i, child: w.Text(sortLabels[i])),
+          ],
+        ),
+      ]),
+      const SizedBox(height: 4),
+    ],
+  );
+}
+
+Widget _emptyState(BuildContext context, IconData icon, String title, String sub,
+    {String? actionLabel, VoidCallback? onAction}) {
+  final cs = Theme.of(context).colorScheme;
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 24),
+    child: Column(
+      children: [
+        CircleAvatar(
+          radius: 40,
+          backgroundColor: cs.primaryContainer,
+          child: Icon(icon, size: 40, color: cs.onPrimaryContainer),
+        ),
+        const SizedBox(height: 16),
+        w.Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        w.Text(sub, textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+        if (actionLabel != null && onAction != null) ...[
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: onAction,
+            icon: const Icon(Icons.play_arrow),
+            label: w.Text(actionLabel),
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 48), padding: const EdgeInsets.symmetric(horizontal: 24)),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+// هيكل تحميل نابض أثناء أول فحص (بدل قائمة فاضية)
+class _SkeletonList extends StatefulWidget {
+  const _SkeletonList();
+  @override
+  State<_SkeletonList> createState() => _SkeletonListState();
+}
+
+class _SkeletonListState extends State<_SkeletonList> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final base = cs.surfaceContainerHighest;
+    Widget bar(double wd, double h) => Container(
+          width: wd,
+          height: h,
+          decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(6)),
+        );
+    return FadeTransition(
+      opacity: Tween<double>(begin: 0.35, end: 1).animate(_c),
+      child: Column(
+        children: [
+          for (var i = 0; i < 4; i++)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(children: [
+                  Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(8))),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [bar(140, 14), const SizedBox(height: 8), bar(double.infinity, 28)],
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// أزرار كبيرة لتقرير الإيصال (صح / غلط) + أزرار ثانوية
+Widget _bigVerdict(BuildContext c, IconData icon, String label, MaterialColor col, VoidCallback? onTap,
+        {bool selected = false}) =>
+    FilledButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 24),
+      label: w.Text(label),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 58),
+        textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        backgroundColor: selected ? col.shade700 : _tintBg(c, col, strong: true),
+        foregroundColor: selected ? Colors.white : _tintFg(c, col),
+      ),
+    );
+
+Widget _bigAct(IconData icon, String label, VoidCallback? onTap) => FilledButton.tonalIcon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 22),
+      label: w.Text(label),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 50),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
+    );
 
 Widget _statusChip(BuildContext c, _St st) => Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -7681,27 +8552,54 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                         _l(context, 'الفرق', 'Difference'),
                         '${_diffText(context, bd)}${r.verdict > 0 && bd != 0 ? _l(context, ' • راجعته يدوي: صح ✓', ' • manually reviewed: OK ✓') : ''}',
                         color: _tintFg(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
+                    if (r.softWarn)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: w.Text(
+                            _l(context, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة',
+                                '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed'),
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      ),
                   ],
                 ),
               ),
           ]),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 6,
-              runSpacing: 6,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Column(
               children: [
-                _mini(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf, filled: true),
-                _mini(Icons.check, _l(context, 'صح ✓', 'OK ✓'), !can ? null : () { widget.onVerdict(1); setState(() {}); }),
-                _mini(Icons.close, _l(context, 'غلط ✗', 'Wrong ✗'), !can ? null : () { widget.onVerdict(-1); setState(() {}); }),
-                if (r.verdict != 0)
-                  _mini(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'), !can ? null : () { widget.onVerdict(0); setState(() {}); }),
-                _mini(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
-                  widget.onRecount();
-                  setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
-                }),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _bigVerdict(context, Icons.check_circle_outline, _l(context, 'صح ✓', 'OK ✓'), Colors.green,
+                          !can ? null : () { HapticFeedback.lightImpact(); widget.onVerdict(1); setState(() {}); },
+                          selected: r.verdict > 0),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _bigVerdict(context, Icons.highlight_off, _l(context, 'غلط ✗', 'Wrong ✗'), Colors.red,
+                          !can ? null : () { HapticFeedback.lightImpact(); widget.onVerdict(-1); setState(() {}); },
+                          selected: r.verdict < 0),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    _bigAct(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf),
+                    if (r.verdict != 0)
+                      _bigAct(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'),
+                          !can ? null : () { widget.onVerdict(0); setState(() {}); }),
+                    _bigAct(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
+                      widget.onRecount();
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
+                    }),
+                  ],
+                ),
               ],
             ),
           ),
@@ -8048,9 +8946,18 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: kids),
         );
 
-    return Scaffold(
-      appBar: AppBar(title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report'))),
-      body: ListView(
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+      appBar: AppBar(
+        title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report')),
+        bottom: TabBar(tabs: [
+          Tab(text: _l(context, 'ملخص', 'Summary')),
+          Tab(text: '${_l(context, 'مراجعة', 'Review')} (${review.length + widget.warnings.length})'),
+        ]),
+      ),
+      body: TabBarView(children: [
+        ListView(
         padding: const EdgeInsets.all(8),
         children: [
           Wrap(
@@ -8089,6 +8996,12 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                       .join(' ، '),
                   style: const TextStyle(fontSize: 13)),
             ]),
+          const SizedBox(height: 16),
+        ],
+      ),
+      ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
           if (widget.warnings.isNotEmpty)
             box(Colors.orange, [
               w.Text('${_l(context, 'ملاحظات للمراجعة', 'Notes for review')} (${widget.warnings.length}):',
@@ -8131,6 +9044,8 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
           const SizedBox(height: 16),
         ],
       ),
+      ]),
+      ),
     );
   }
 }
@@ -8147,6 +9062,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   int days = 0;
   bool skipDone = true;
   bool reviewOnly = false;
+  String _q = '';
+  int _sort = 0;
+  final TextEditingController _searchCtl = TextEditingController();
   bool namingDone = false; // التسمية خلصت (حتى لو العد لسه شغال): زرار الإرسال يتفعل
   bool busy = false;
   bool stopReq = false;
@@ -8264,6 +9182,28 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
+  List<MResult> _visibleResults() {
+    var l = results.where((r) => !reviewOnly || !r.ok).toList();
+    final q = _q.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      l = l
+          .where((r) => [r.newName ?? '', r.pdfName, '${r.orderNum ?? ''}'].any((t) => t.toLowerCase().contains(q)))
+          .toList();
+    }
+    switch (_sort) {
+      case 1:
+        _stableSort<MResult>(l, (a, b) => (a.orderNum ?? 999).compareTo(b.orderNum ?? 999));
+        break;
+      case 2:
+        _stableSort<MResult>(l, (a, b) => (_batchDiff(b)?.abs() ?? -1).compareTo(_batchDiff(a)?.abs() ?? -1));
+        break;
+      case 3:
+        _stableSort<MResult>(l, (a, b) => b.count.compareTo(a.count));
+        break;
+    }
+    return l;
+  }
+
   Future<void> _startCountAll({bool auto = false}) async {
     _doneSig = _scanSig();
     if (!auto) {
@@ -9560,6 +10500,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
     final totalRc = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
+    final visRes = _visibleResults();
     _syncBadge(machBadge, reviewN);
     machBusyG = busy;
     return Scaffold(
@@ -9595,48 +10536,28 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     setState(() {});
                   }),
             const Divider(height: 4),
-            InkWell(
-              onTap: () => setState(() => settingsOpen = !settingsOpen),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    const Icon(Icons.tune, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                          'إعدادات المصدر • ${_periodLabelOf(days)} • ${pdfDir == null ? 'واتساب' : baseName(pdfDir!)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13)),
-                    ),
-                    Icon(settingsOpen ? Icons.expand_less : Icons.expand_more),
-                  ],
+            _sourceChips(context,
+                busy: busy,
+                days: days,
+                onDays: (d) {
+                  setState(() => days = d);
+                  sharedDays.value = d;
+                },
+                periodLabel: _periodLabelOf(days),
+                sourcePath: pdfDir,
+                onPickSource: pickDir,
+                onUseWhatsApp: () {
+                  savePdfDir(null);
+                  setState(() => pdfDir = null);
+                },
                 ),
-              ),
-            ),
-            if (settingsOpen) ...[
-              const Divider(height: 4),
-              _periodRow(days, busy, (d) {
-                setState(() => days = d);
-                sharedDays.value = d;
-              }),
-              const Divider(height: 10),
-              _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
-                  busy ? null : pickDir,
-                  onReset: pdfDir != null && !busy
-                      ? () {
-                          savePdfDir(null);
-                          setState(() => pdfDir = null);
-                        }
-                      : null),
-              _pathRow(Icons.drive_file_move_outline, 'الإخراج',
-                  '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
-                  onReset: destDir != defaultMDest && !busy ? useDefaultOut : null,
-                  actions: [
-                    _pathAct(Icons.open_in_new, 'فتح فولدر الإخراج', 'Open output folder', openDest),
-                  ]),
-            ],
+            _outputCard(context,
+                busy: busy,
+                outPath: destDir,
+                outIsDefault: destDir == defaultMDest,
+                onPickOut: pickOut,
+                onUseDefaultOut: useDefaultOut,
+                onOpenOut: openDest),
           ]),
           _runAllCard(),
           _statusBox(status),
@@ -9671,6 +10592,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               reviewOnly: reviewOnly,
               busy: busy,
               onRestOk: markRestOk),
+          if (results.isNotEmpty)
+            _listTools(context,
+                remaining: reviewN,
+                total: results.length,
+                controller: _searchCtl,
+                onQuery: (v) => setState(() => _q = v),
+                sort: _sort,
+                sortLabels: [
+                  _l(context, 'الترتيب الأصلي', 'Original order'),
+                  _l(context, 'رقم الماكينة', 'Machine number'),
+                  _l(context, 'الأكبر فرقاً', 'Largest gap'),
+                  _l(context, 'الأكثر إيصالات', 'Most receipts'),
+                ],
+                onSort: (v) => setState(() => _sort = v)),
           if (missing.isNotEmpty) ...[
             const SizedBox(height: 10),
             Container(
@@ -9685,13 +10620,32 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ),
           ],
           const SizedBox(height: 10),
-          for (final r in results.where((r) => !reviewOnly || !r.ok))
+          if (results.isEmpty && busy) const _SkeletonList(),
+          if (results.isEmpty && !busy)
+            _emptyState(context, Icons.folder_copy, _l(context, 'مفيش ملفات لسه', 'No files yet'),
+                _l(context, 'اضغط "فحص إيصالات الدفع" علشان نقرا ملفات الـ PDF ونسمّيها.',
+                    'Tap "Scan payment receipts" to read and rename the PDF files.'),
+                actionLabel: _l(context, 'فحص إيصالات الدفع', 'Scan payment receipts'),
+                onAction: () => _startCountAll()),
+          if (results.isNotEmpty && visRes.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(child: w.Text(_l(context, 'مفيش نتايج.', 'No results.'))),
+            ),
+          for (final r in visRes)
             Builder(builder: (context) {
               final match = _batchMatch(r);
               final soft = _batchSoft(r);
+              final stripColor = _mStripColor(r);
+              final Color? cardTint = r.excluded
+                  ? _tintBg(context, Colors.grey, strong: true)
+                  : (match == null
+                      ? null
+                      : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red))));
               return Dismissible(
                 key: ValueKey('t_${r.key}'),
                 confirmDismiss: (dir) async {
+                  HapticFeedback.lightImpact();
                   setVerdict(r, dir == DismissDirection.startToEnd ? 1 : -1, toggle: false);
                   return false;
                 },
@@ -9707,24 +10661,23 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: const Text('غلط ✗', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-                child: Card(
+                child: TweenAnimationBuilder<Color?>(
+                  tween: ColorTween(end: cardTint),
+                  duration: const Duration(milliseconds: 350),
+                  builder: (context, cardCol, _) => Card(
                   margin: const EdgeInsets.symmetric(vertical: 2),
-                  color: r.excluded
-                      ? _tintBg(context, Colors.grey, strong: true)
-                      : (match == null
-                          ? null
-                          : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red)))),
-                  child: ListTile(
+                  clipBehavior: Clip.antiAlias,
+                  color: cardCol,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 350),
+                    decoration: BoxDecoration(
+                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 5)),
+                    ),
+                    child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12),
                     onTap: () => openReport(r),
-                    title: Text('${r.softWarn ? '⚠️ ' : ''}${r.newName ?? '؟ ${r.pdfName}'}',
-                        style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            decoration: r.excluded ? TextDecoration.lineThrough : null)),
-                    subtitle: w.Text(
-                        '${r.verdict > 0 ? _l(context, '✓ اتراجع: صح\n', '✓ Reviewed: OK\n') : ''}'
-                        '${r.pending && busy ? _l(context, 'بيتعدّ...', 'Counting...') : _mSummary(context, r)}'
-                        '${r.notes.isEmpty ? '' : '\n${_l(context, '⚠️ ${r.notes.length} ملاحظة - اضغط لفتح التقرير', '⚠️ ${r.notes.length} note(s) - tap to open the report')}'}'),
+                    title: _mTitle(context, r),
+                    subtitle: _mSubtitle(context, r, busy),
                     trailing: SizedBox(
                       width: 118,
                       child: Row(
@@ -9732,7 +10685,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         children: [
                           SizedBox(
                             width: 66,
-                            child: TextField(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                            Text(_l(context, 'الباتش', 'Batch'),
+                                style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                            const SizedBox(height: 2),
+                            TextField(
                               controller: r.ctl,
                               keyboardType: TextInputType.number,
                               textAlign: TextAlign.center,
@@ -9752,6 +10713,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 saveMState(results);
                                 setState(() {});
                               },
+                            ),
+                              ],
                             ),
                           ),
                           PopupMenuButton<String>(
@@ -9794,6 +10757,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         ],
                       ),
                     ),
+                  ),
+                  ),
                   ),
                 ),
               );
