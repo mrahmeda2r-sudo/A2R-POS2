@@ -10641,6 +10641,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               final match = _batchMatch(r);
               final soft = _batchSoft(r);
               final stripColor = _mStripColor(r);
+              final Color? cardTint = r.excluded
+                  ? _tintBg(context, Colors.grey, strong: true)
+                  : (match == null
+                      ? null
+                      : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red))));
               return Dismissible(
                 key: ObjectKey(r),
                 confirmDismiss: (dir) async {
@@ -10660,9 +10665,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: const Text('غلط ✗', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-                child: Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
+                child: TweenAnimationBuilder<Color?>(
+                  tween: ColorTween(end: cardTint ?? Theme.of(context).colorScheme.surfaceContainerLow),
+                  duration: const Duration(milliseconds: 350),
+                  builder: (context, cardCol, _) => Card(
+                  margin: const EdgeInsets.symmetric(vertical: 2),
                   clipBehavior: Clip.antiAlias,
+                  color: cardCol,
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 350),
                     decoration: BoxDecoration(
@@ -10771,6 +10780,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     ),
                   ),
                   ),
+                ),
               );
             }),
         ],
