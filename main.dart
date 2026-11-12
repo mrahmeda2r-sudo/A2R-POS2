@@ -2575,35 +2575,38 @@ Decision decide(List<Parsed> results) {
       return Decision(b, true);
     }
   }
-  // 1.5) إجمالي GRAND اتقرا مرتين بنفس القيمة (في نفس القراءة): هو الأقوى
+  // 1.5) إجمالي GRAND اتقرا مرتين بنفس القيمة (في نفس القراءة): هو الأقوى.
+  // بنتجاهل القراءة اللي المبالغ فيها جاية بعد GRAND (ترتيب القراءة الخام) لأنها بتخلط مبالغ الكروت مع الإجمالي،
+  // وبنستبعد أي رقم هو نفسه مبلغ كارت.
+  final cardVals = <double>{};
+  for (final r in results) {
+    for (final s in r.secs) {
+      cardVals.addAll(s);
+    }
+  }
   final gc = <double, int>{};
   for (final r in results) {
+    if (r.secs.every((s) => s.isEmpty)) continue;
     final loc = <double, int>{};
     for (final g in r.grand) {
       loc[g] = (loc[g] ?? 0) + 1;
     }
     loc.forEach((k, v) {
+      if (cardVals.contains(k)) return;
       if (v > (gc[k] ?? 0)) gc[k] = v;
     });
   }
-  double? strongG;
-  var best = 0;
-  var tie = false;
-  for (final e in gc.entries) {
-    if (e.value > best) {
-      best = e.value;
-      strongG = e.key;
-      tie = false;
-    } else if (e.value == best) {
-      tie = true;
+  final strongC = [
+    for (final e in gc.entries)
+      if (e.value >= 2) e.key
+  ]..sort((x, y) => gc[y]!.compareTo(gc[x]!));
+  for (final g in strongC) {
+    for (final r in results) {
+      if (r.countsOk || _comboHits(r.secs, g)) return Decision(g, true);
     }
   }
-  final strong = strongG != null && best >= 2 && !tie;
-  if (strong) {
-    for (final r in results) {
-      if (r.countsOk || _comboHits(r.secs, strongG!)) return Decision(strongG!, true);
-    }
-    return Decision(strongG!, false); // مش مؤكد، بس ده أقوى مرشح (ومش مجموع الكروت)
+  if (strongC.length == 1) {
+    return Decision(strongC.first, false); // مش مؤكد، بس ده أقوى مرشح (ومش مجموع الكروت)
   }
   // 2) فرق رقم واحد (بس لما مفيش إجمالي متكرر)
   for (final r in results) {
@@ -5412,10 +5415,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // القلم: شاشة كاملة فيها الإيصال بزوم + تعديل المبلغ والماكينة
   Future<void> editReceipt(ReceiptItem item) async {
+    // القايمة اللي ظاهرة قدامك (بنفس الفلتر والبحث والترتيب) علشان تسحب يمين/شمال بين الباتشات
+    final rvCount = processedItems.where((e) => e.needsReview).length;
+    var list = _visibleItems(reviewOnly && rvCount > 0);
+    var at = list.indexOf(item);
+    if (at < 0) {
+      list = List<ReceiptItem>.from(processedItems);
+      at = list.indexOf(item);
+    }
+    if (at < 0) {
+      list = [item];
+      at = 0;
+    }
     final changed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => ReviewPage(items: [item], allItems: processedItems, single: true),
+        builder: (_) => ReviewPage(items: list, allItems: processedItems, single: true, initialIndex: at),
       ),
     );
     if (changed == true) {
@@ -7213,7 +7228,8 @@ class _FolderPickerState extends State<FolderPicker> {
 // ───────── صورة بتتكبّر (قرصة بصباعين + دبل تاب) علشان تشوف تفاصيل الباتش ─────────
 class ZoomableImage extends StatefulWidget {
   final String path;
-  const ZoomableImage({super.key, required this.path});
+  final ValueChanged<bool>? onZoom; // بيبلّغ لما الصورة تتكبّر/ترجع (علشان السحب بين الباتشات)
+  const ZoomableImage({super.key, required this.path, this.onZoom});
 
   @override
   State<ZoomableImage> createState() => _ZoomableImageState();
@@ -7222,9 +7238,25 @@ class ZoomableImage extends StatefulWidget {
 class _ZoomableImageState extends State<ZoomableImage> {
   final _tc = TransformationController();
   Offset _tap = Offset.zero;
+  bool _zoomedNow = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tc.addListener(_onTc);
+  }
+
+  void _onTc() {
+    final z = _tc.value.getMaxScaleOnAxis() > 1.05;
+    if (z != _zoomedNow) {
+      _zoomedNow = z;
+      widget.onZoom?.call(z);
+    }
+  }
 
   @override
   void dispose() {
+    _tc.removeListener(_onTc);
     _tc.dispose();
     super.dispose();
   }
@@ -7283,8 +7315,10 @@ class ReceiptZoomPage extends StatelessWidget {
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
-  final bool single; // فتحناها من القلم لإيصال واحد
-  const ReviewPage({super.key, required this.items, this.allItems, this.single = false});
+  final bool single; // فتحناها من القلم: الحفظ بيقفل الشاشة (والسحب يمين/شمال بيتنقل بين الباتشات)
+  final int initialIndex;
+  const ReviewPage(
+      {super.key, required this.items, this.allItems, this.single = false, this.initialIndex = 0});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -7297,12 +7331,16 @@ class _ReviewPageState extends State<ReviewPage> {
   final done = <ReceiptItem>{};
   late TextEditingController amt;
   int? order;
+  late PageController _pc;
+  final ValueNotifier<bool> _zoomed = ValueNotifier<bool>(false);
 
   ReceiptItem get item => widget.items[idx];
 
   @override
   void initState() {
     super.initState();
+    idx = widget.initialIndex.clamp(0, widget.items.length - 1).toInt();
+    _pc = PageController(initialPage: idx);
     amt = TextEditingController();
     load();
   }
@@ -7310,6 +7348,8 @@ class _ReviewPageState extends State<ReviewPage> {
   @override
   void dispose() {
     amt.dispose();
+    _pc.dispose();
+    _zoomed.dispose();
     super.dispose();
   }
 
@@ -7320,10 +7360,15 @@ class _ReviewPageState extends State<ReviewPage> {
 
   void go(int i) {
     if (i < 0 || i >= widget.items.length) return;
-    setState(() {
-      idx = i;
-      load();
-    });
+    if (_pc.hasClients) {
+      // onPageChanged بيحدّث idx والنموذج
+      _pc.animateToPage(i, duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+    } else {
+      setState(() {
+        idx = i;
+        load();
+      });
+    }
   }
 
   void save({bool next = true}) {
@@ -7451,7 +7496,29 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Stack(
         children: [
           Positioned.fill(
-            child: ZoomableImage(key: ValueKey('${it.path}#$rev'), path: it.path),
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _zoomed,
+              builder: (c, z, _) => PageView.builder(
+                controller: _pc,
+                // لما الصورة مكبّرة السحب بيحرّك الصورة، ولما ترجع 1x السحب يقلب للباتش اللي بعده/قبله
+                physics: z ? const NeverScrollableScrollPhysics() : const PageScrollPhysics(),
+                itemCount: widget.items.length,
+                onPageChanged: (i) {
+                  _zoomed.value = false;
+                  setState(() {
+                    idx = i;
+                    load();
+                  });
+                },
+                itemBuilder: (c, i) => ZoomableImage(
+                  key: ValueKey('${widget.items[i].path}#${i == idx ? rev : 0}'),
+                  path: widget.items[i].path,
+                  onZoom: (zz) {
+                    if (i == idx) _zoomed.value = zz;
+                  },
+                ),
+              ),
+            ),
           ),
           Positioned(
             top: 4,
@@ -7698,7 +7765,7 @@ class _ReviewPageState extends State<ReviewPage> {
               Expanded(
                 child: FilledButton(
                   onPressed: () => save(),
-                  child: Text(idx < widget.items.length - 1 ? 'حفظ والتالي' : 'حفظ'),
+                  child: Text(!widget.single && idx < widget.items.length - 1 ? 'حفظ والتالي' : 'حفظ'),
                 ),
               ),
             ],
@@ -7715,7 +7782,9 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Scaffold(
         appBar: AppBar(
           title: Text('مراجعة ${idx + 1} / ${widget.items.length}'
-              '${done.contains(it) ? '  ✓' : ''}'),
+              '${done.contains(it) ? '  ✓' : ''}'
+              '  •  ${it.needsReview ? _l(context, '⚠️ محتاج مراجعة', '⚠️ Needs review') : _l(context, '✅ سليم', '✅ OK')}',
+              style: const TextStyle(fontSize: 16)),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
             onPressed: () => Navigator.pop(context, changed),
