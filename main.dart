@@ -734,6 +734,10 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
         resetDefaultHandlers(context);
       } else if (v == 'log') {
         onLog();
+      } else if (v == 'machines') {
+        openMachinesManager(context);
+      } else if (v == 'autolog') {
+        showAutoLog(context);
       } else if (v == 'wipe') {
         wipeEverything(context);
       }
@@ -745,6 +749,12 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
           value: 'battery', child: w.Text(ar ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
       PopupMenuItem(
           value: 'resetApps', child: w.Text(ar ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
+      PopupMenuItem(
+          value: 'machines',
+          enabled: !busy,
+          child: w.Text((ar ? 'إدارة الماكينات' : 'Manage machines') +
+              (pendingMachines.isEmpty ? '' : ' (${pendingMachines.length})'))),
+      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص التلقائي' : 'Auto-scan log')),
       PopupMenuItem(value: 'log', child: w.Text(ar ? 'مشاركة اللوج' : 'Share log')),
       const PopupMenuDivider(),
       PopupMenuItem(
@@ -857,16 +867,49 @@ class RootPage extends StatefulWidget {
 class _RootPageState extends State<RootPage> {
   int tab = 0;
 
+  AppLifecycleListener? _lcl;
+
   @override
   void initState() {
     super.initState();
     chainStep.addListener(_onChain);
+    openReqG.addListener(_onOpenReq);
+    _chan.setMethodCallHandler(_onNative);
+    _lcl = AppLifecycleListener(onResume: _pullOpen);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pullOpen());
   }
 
   @override
   void dispose() {
     chainStep.removeListener(_onChain);
+    openReqG.removeListener(_onOpenReq);
+    _lcl?.dispose();
     super.dispose();
+  }
+
+  Future<dynamic> _onNative(MethodCall call) async {
+    if (call.method == 'onOpen') {
+      final p = call.arguments;
+      if (p is String && p.isNotEmpty) requestOpenG(p);
+      try {
+        await _chan.invokeMethod('getInitialOpen'); // نمسح الطلب من ناحية أندرويد
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> _pullOpen() async {
+    try {
+      final p = await _chan.invokeMethod<String>('getInitialOpen');
+      if (p != null && p.isNotEmpty) requestOpenG(p);
+    } catch (_) {}
+  }
+
+  void _onOpenReq() {
+    final v = openReqG.value;
+    if (v == null || !mounted) return;
+    final t = v.startsWith('mach|') ? 1 : 0;
+    if (t != tab) setState(() => tab = t);
   }
 
   // أثناء الفحص الشامل: نفتح التاب اللي شغال دلوقتي
@@ -999,6 +1042,53 @@ final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<in
 final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
 bool homeBusyG = false;
 bool machBusyG = false;
+bool quickBusyG = false; // الفحص التلقائي الخفيف شغال دلوقتي (الفحص اليدوي بيستنى لحد ما يخلص)
+
+Future<void> waitQuickIdle() async {
+  while (quickBusyG) {
+    await Future.delayed(const Duration(milliseconds: 400));
+  }
+}
+
+// قفل خدمة الخلفية بس لو مفيش فحص تلقائي شغال في أي تاب
+Future<void> stopKeepAliveSafe() async {
+  if (homeAutoG || machAutoG) return;
+  try {
+    await _chan.invokeMethod('stopKeepAlive');
+  } catch (_) {}
+}
+
+// ───────── الفحص التلقائي الخفيف: الملفات اللي اتفحصت (seen) + نتايج النهارده (لكشف التكرار) ─────────
+const int _kQuickSeenMax = 800; // آخر 800 مفتاح بس
+const int _kQuickBulk = 25; // أكتر من كده في دورة واحدة = مش وصول جديد (فترة/فولدر اتغيّر): ما نفحصهمش تلقائي
+
+String quickKeyOf(File f) {
+  var len = 0;
+  try {
+    len = f.lengthSync();
+  } catch (_) {}
+  return '${baseName(f.path)}:$len';
+}
+
+bool quickHasBaseline() => _readCfg()['quickSeen'] is List;
+
+Set<String> loadQuickSeen() {
+  final v = _readCfg()['quickSeen'];
+  return v is List ? v.map((e) => e.toString()).toSet() : <String>{};
+}
+
+void quickMarkSeen(Iterable<String> keys) {
+  final cfg = _readCfg();
+  final cur = cfg['quickSeen'] is List
+      ? (cfg['quickSeen'] as List).map((e) => e.toString()).toList()
+      : <String>[];
+  final have = cur.toSet();
+  for (final k in keys) {
+    if (have.add(k)) cur.add(k);
+  }
+  cfg['quickSeen'] = cur.length > _kQuickSeenMax ? cur.sublist(cur.length - _kQuickSeenMax) : cur;
+  _writeCfg(cfg);
+}
 
 // ───────── الفحص الشامل: الباتشات (التقفيل) ثم الملفات (إيصالات الدفع) ورا بعض ─────────
 bool chainRunning = false;
@@ -1023,6 +1113,7 @@ Future<void> runAllScans() async {
   chainRunning = true;
   chainAbort = false;
   chainSummary.value = '';
+  await waitQuickIdle(); // لو الفحص الخفيف شغال نستناه يخلص
   final chainSw = Stopwatch()..start();
   try {
     await Permission.notification.request();
@@ -1892,7 +1983,8 @@ const List<List<String>> _kEnPhrases = [
   ['جاري فحص الملفات', 'Scanning files'],
   ['اكتمل الفحص الشامل', 'Full scan complete'],
   ['اتوقف الفحص الشامل', 'Full scan stopped'],
-  ['فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', 'Auto scan (watches new files and scans them by itself)'],
+  ['فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (counts each new file by itself and notifies you of the result)'],
+  ['فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (checks each new receipt by itself and notifies you of the result)'],
   ['الباقي صح', 'Mark rest OK'],
   ['فتح الصورة', 'Open image'],
   ['إرسال الصورة', 'Send image'],
@@ -2203,10 +2295,158 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "خدمات مصر",
 };
 
-// ───────── ماكينات جديدة (TID مختلف) لوحدة موجودة: بتتعرف من الـ Merchant ID أو اسم الوحدة وبتتحفظ ─────────
-const int kBaseMachines = 19; // ماكينات الأساس المكتوبة في الكود (فحص الماكينات الناقصة عليها بس)
+// ───────────── استخراج اسم الوحدة والـ Merchant ID من الإيصال ─────────────
+int _editDistance(String a, String b) {
+  if (a == b) return 0;
+  if (a.isEmpty) return b.length;
+  if (b.isEmpty) return a.length;
+  var prev = List<int>.generate(b.length + 1, (i) => i);
+  for (var i = 1; i <= a.length; i++) {
+    final cur = List<int>.filled(b.length + 1, 0);
+    cur[0] = i;
+    for (var j = 1; j <= b.length; j++) {
+      final cost = a[i - 1] == b[j - 1] ? 0 : 1;
+      cur[j] = math.min(math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+String _normUnit(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9\u0600-\u06FF]'), '');
+
+String? _cleanUnitName(String raw) {
+  final s = raw
+      .replaceAll(RegExp(r'[^A-Za-z0-9\u0600-\u06FF \-]'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  final letters = RegExp(r'[A-Za-z\u0600-\u06FF]').allMatches(s).length;
+  final digits = RegExp(r'\d').allMatches(s).length;
+  if (letters < 4 || digits > letters) return null;
+  return s.length > 40 ? s.substring(0, 40).trim() : s;
+}
+
+// اسم الوحدة المكتوب على الإيصال: بعد كلمة MERCHANT NAME لو موجودة، وإلا أول سطر اسم في أعلى الإيصال
+String? extractUnitName(List<String> texts) {
+  final label = RegExp(r'MERCHANT\s*NAME\s*[:\-]?\s*(.+)', caseSensitive: false);
+  for (final t in texts) {
+    for (final l in t.split('\n')) {
+      final m = label.firstMatch(l.trim());
+      if (m != null) {
+        final n = _cleanUnitName(m.group(1)!);
+        if (n != null) return n;
+      }
+    }
+  }
+  // إيصالات NBE: اسم الوحدة بيبقى سطر بالشكل "EC <الاسم> TRF" (حتى لو OCR دمجه مع سطر تاني)
+  final ecRe = RegExp(r'\bE\s?C\s+([A-Z0-9][A-Z0-9 \-]{2,40}?)\s+TR[FE]\b');
+  final ecFound = <String>[];
+  for (final t in texts) {
+    for (final l in t.split('\n')) {
+      final m = ecRe.firstMatch(l.toUpperCase());
+      if (m != null) {
+        final n = _cleanUnitName('EC ${m.group(1)!.trim()} TRF');
+        if (n != null) ecFound.add(n);
+      }
+    }
+  }
+  final ecBest = mostCommon(ecFound)?.key;
+  if (ecBest != null) return ecBest;
+  final skip = RegExp(
+      r'NATIONAL|BANK|\bNBE\b|EGYPT|RECEIPT|CUSTOMER|COPY|MERCHANT|TERMINAL|BATCH|DATE|TIME|SALE|TOTAL|AMOUNT|VISA|MASTER|MEEZ|THANK|SUCCESS|CLOSED|CARD|APPROVAL|\bRRN\b|TRACE|VERSION|GRAND|REPORT|SETTLEMENT|\bST\b|STREET|ALEX|CAIRO|\b02F\b|INSIDE|NEXT\s*TO|\bFRON',
+      caseSensitive: false);
+  // اسم الوحدة بيبقى تحت سطر "NATIONAL BANK OF EGYPT" على طول (قبل سطر العنوان)
+  final bankLine = RegExp(r'BANK\s*OF\s*EGYPT|NATIONAL\s*BANK|^\s*NBE\s*$', caseSensitive: false);
+  for (final t in texts) {
+    final ls = t.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    for (var i = 0; i < ls.length; i++) {
+      if (!bankLine.hasMatch(ls[i])) continue;
+      for (var j = i + 1; j < ls.length && j <= i + 3; j++) {
+        if (skip.hasMatch(ls[j])) continue;
+        final n = _cleanUnitName(ls[j]);
+        if (n != null) return n;
+      }
+      break;
+    }
+  }
+  for (final t in texts) {
+    var seen = 0;
+    for (final raw in t.split('\n')) {
+      final l = raw.trim();
+      if (l.isEmpty) continue;
+      if (++seen > 8) break;
+      if (skip.hasMatch(l)) continue;
+      final n = _cleanUnitName(l);
+      if (n != null) return n;
+    }
+  }
+  return null;
+}
+
+// الـ MERCHANT ID المكتوب على الإيصال (الأكتر تكراراً بين القراءات)
+// 1) الشكل المعتاد: كلمة MERCHANT ID (أو غلطات قراءتها زي 1D / MID) وبعدها الرقم، حتى لو في سطر تاني.
+//    ما بيعديش على كلمة TERMINAL / TID علشان ما ياخدش رقم الترمنل بالغلط.
+// 2) احتياطي: لو الكلمة موجودة والرقم بعيد عنها (الـ OCR لخبط ترتيب الأسطر): رقم واحد بس من 10 لـ 16 رقم في النص.
+//    لو فيه أكتر من رقم أو النص إيصال دفع (RRN / APPROVAL): مفيش تخمين، بيرجّع null ويتنبّه عليه.
+String? extractMerchantId(List<String> texts) {
+  final found = <String>[];
+  final re = RegExp(
+      r"(?:MERCH\w*\s*(?:ID|I0|1D|IO|10|NO|N0)|\bMID)\W{0,3}(?:(?!TERMINAL|TID|\d)[\s\S]){0,40}?(\d[\d\s/]{6,18}\d)",
+      caseSensitive: false);
+  for (final t in texts) {
+    for (final m in re.allMatches(t)) {
+      final d = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+      if (d.length >= 8 && d.length <= 16) found.add(d);
+    }
+  }
+  final best = mostCommon(found)?.key;
+  if (best != null) return best;
+  final hint = RegExp(r'MERCH|\bMID\b', caseSensitive: false);
+  final payish = RegExp(r'RRN|APPROVAL|AUTH', caseSensitive: false);
+  final lone = RegExp(r'(?<![\d*])(\d[\d ]{8,20}\d)(?![\d*])');
+  for (final t in texts) {
+    if (!hint.hasMatch(t) || payish.hasMatch(t)) continue;
+    final c = <String>{};
+    for (final m in lone.allMatches(t)) {
+      final d = m.group(1)!.replaceAll(RegExp(r'\D'), '');
+      if (d.length >= 10 && d.length <= 16) c.add(d);
+    }
+    if (c.length == 1) return c.first;
+  }
+  return null;
+}
+
+
+// ═══════════════ سجل الماكينات والـ Merchant IDs (A2R-POS) ═══════════════
+// الماكينات الـ19 الأساسية مكتوبة في الكود. اللي بيتحفظ في .app_registry.json:
+// الماكينات الجديدة، الـ Merchant IDs المعروفة (وحدتها)، ماكينات في انتظار الموافقة، الإجازات، وتعديلات الوحدة.
+// صفوف الإكسيل (2..11) ثابتة: أي Merchant ID بيتربط بوحدة من الوحدات الموجودة.
+const int kBaseMachines = 19;
+
+class MerchantEntry {
+  String mid;
+  int row;
+  MerchantEntry(this.mid, this.row);
+}
+
+class PendingMachine {
+  String tid;
+  String mid;
+  String name;
+  int? guessRow;
+  String at;
+  String note;
+  PendingMachine(this.tid, this.mid, this.name, this.guessRow, this.at, this.note);
+}
+
+final List<MerchantEntry> merchantList = [];
+final List<PendingMachine> pendingMachines = [];
+final Set<String> offTids = {};
+final Map<String, String> machineMerchant = {};
 final Set<String> _extraTids = {};
-String get _extraTermPath => '$baseDir/extra_terminals.json';
+final Map<String, int> _rowOverride = {};
+final ValueNotifier<int> registryRev = ValueNotifier<int>(0);
+String get _registryPath => '$baseDir/.app_registry.json';
 
 int get machineCount {
   var m = 0;
@@ -2216,49 +2456,279 @@ int get machineCount {
   return m;
 }
 
-void loadExtraTerminals() {
+// تطابق كامل بس. الاستثناء الوحيد: كود أقصر (10 أرقام أو أكتر) هو نهاية كود أطول (OCR بيلزّق أرقام زيادة)
+bool merchantEq(String a, String b) {
+  if (a.isEmpty || b.isEmpty) return false;
+  if (a == b) return true;
+  final s = a.length <= b.length ? a : b;
+  final l = a.length <= b.length ? b : a;
+  return s.length >= 10 && l.endsWith(s);
+}
+
+int? _legacyRowForMerchant(String mid) {
+  final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(mid);
+  if (mm == null) return null;
+  return merchantCodeMap[mm.group(1)];
+}
+
+// صف الوحدة لـ Merchant ID: من اللي اتسجل، أو من الشكل القديم المعروف
+int? rowForMerchant(String mid) {
+  for (final e in merchantList) {
+    if (merchantEq(e.mid, mid)) return e.row;
+  }
+  return _legacyRowForMerchant(mid);
+}
+
+void saveRegistry() {
   try {
-    final f = File(_extraTermPath);
+    final Map<String, dynamic> j = {
+      'v': 1,
+      'extras': [
+        for (final tid in _extraTids)
+          if (terminals[tid] != null)
+            {'tid': tid, 'row': terminals[tid]!.excelRow, 'o': terminals[tid]!.orderNum}
+      ],
+      'merchants': [
+        for (final m in merchantList) {'mid': m.mid, 'row': m.row}
+      ],
+      'pending': [
+        for (final p in pendingMachines)
+          {'tid': p.tid, 'mid': p.mid, 'name': p.name, 'row': p.guessRow, 'at': p.at, 'note': p.note}
+      ],
+      'off': offTids.toList(),
+      'mm': machineMerchant,
+      'ov': _rowOverride,
+    };
+    Directory(baseDir).createSync(recursive: true);
+    File(_registryPath).writeAsStringSync(jsonEncode(j));
+  } catch (e) {
+    _dbg('registry save error: $e');
+  }
+}
+
+Future<void> loadRegistry() async {
+  try {
+    final f = File(_registryPath);
     if (!f.existsSync()) return;
-    final m = jsonDecode(f.readAsStringSync());
-    if (m is! List) return;
-    for (final e in m) {
+    final j = jsonDecode(f.readAsStringSync());
+    if (j is! Map) return;
+    merchantList.clear();
+    pendingMachines.clear();
+    offTids.clear();
+    machineMerchant.clear();
+    _rowOverride.clear();
+    for (final e in ((j['merchants'] as List?) ?? const [])) {
+      final mid = e['mid'].toString();
+      final row = (e['row'] as num).toInt();
+      if (mid.isNotEmpty && rowNames.containsKey(row)) merchantList.add(MerchantEntry(mid, row));
+    }
+    for (final e in ((j['pending'] as List?) ?? const [])) {
+      pendingMachines.add(PendingMachine(
+          e['tid'].toString(),
+          (e['mid'] ?? '').toString(),
+          (e['name'] ?? '').toString(),
+          (e['row'] as num?)?.toInt(),
+          (e['at'] ?? '').toString(),
+          (e['note'] ?? '').toString()));
+    }
+    for (final e in ((j['off'] as List?) ?? const [])) {
+      offTids.add(e.toString());
+    }
+    final mm = j['mm'];
+    if (mm is Map) {
+      for (final e in mm.entries) {
+        machineMerchant[e.key.toString()] = e.value.toString();
+      }
+    }
+    final ex = <Map>[];
+    for (final e in ((j['extras'] as List?) ?? const [])) {
+      if (e is Map) ex.add(e);
+    }
+    ex.sort((a, b) => ((a['o'] as num?) ?? 0).compareTo((b['o'] as num?) ?? 0));
+    for (final e in ex) {
       final tid = e['tid'].toString();
-      final row = e['row'] as int;
-      if (terminals.containsKey(tid) || !rowNames.containsKey(row)) continue;
-      var order = (e['o'] as int?) ?? 0;
+      final row = (e['row'] as num).toInt();
+      final have = terminals[tid];
+      if (have != null) {
+        if (have.orderNum > kBaseMachines) _extraTids.add(tid);
+        continue;
+      }
+      if (!rowNames.containsKey(row)) continue;
+      var order = ((e['o'] as num?) ?? 0).toInt();
       if (order <= kBaseMachines || numToTid.containsKey(order)) order = machineCount + 1;
       terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
       numToTid[order] = tid;
       _extraTids.add(tid);
     }
+    final ov = j['ov'];
+    if (ov is Map) {
+      for (final e in ov.entries) {
+        final tid = e.key.toString();
+        final row = (e.value as num).toInt();
+        final info = terminals[tid];
+        if (info == null || !rowNames.containsKey(row)) continue;
+        terminals[tid] = TerminalInfo(info.orderNum, row, rowNames[row]!);
+        _rowOverride[tid] = row;
+      }
+    }
+    registryRev.value++;
   } catch (e) {
-    _dbg('extra terminals load error: $e');
+    _dbg('registry load error: $e');
   }
 }
 
-void _saveExtraTerminals() {
+void _registerMachine(String tid, int row, String? mid) {
+  final order = machineCount + 1;
+  terminals[tid] = TerminalInfo(order, row, rowNames[row] ?? 'وحدة $row');
+  numToTid[order] = tid;
+  _extraTids.add(tid);
+  if (mid != null && mid.isNotEmpty) machineMerchant[tid] = mid;
+  saveRegistry();
+  registryRev.value++;
+  _dbg('NEW TERMINAL $tid -> ${rowNames[row]} (ماكينة $order) merchant=${mid ?? '?'}');
+}
+
+void _moveMachine(String tid, int row) {
+  final info = terminals[tid];
+  if (info == null || !rowNames.containsKey(row)) return;
+  terminals[tid] = TerminalInfo(info.orderNum, row, rowNames[row]!);
+  if (!_extraTids.contains(tid)) _rowOverride[tid] = row;
+}
+
+void setMachineMerchant(String tid, String mid) {
+  if (mid.isEmpty) {
+    machineMerchant.remove(tid);
+  } else {
+    machineMerchant[tid] = mid;
+    final r = rowForMerchant(mid);
+    final info = terminals[tid];
+    if (r != null && info != null && r != info.excelRow) _moveMachine(tid, r);
+  }
+  saveRegistry();
+  registryRev.value++;
+}
+
+void setMachineOff(String tid, bool off) {
+  if (off) {
+    offTids.add(tid);
+  } else {
+    offTids.remove(tid);
+  }
+  saveRegistry();
+  registryRev.value++;
+}
+
+// Merchant ID جديد بيتكتب يدوي: بيتسجل لوحدة (صف) وبيتربط بالماكينة
+void addMerchantAndAssign(String tid, String mid, int row) {
+  if (!rowNames.containsKey(row)) return;
+  if (!merchantList.any((m) => merchantEq(m.mid, mid))) merchantList.add(MerchantEntry(mid, row));
+  machineMerchant[tid] = mid;
+  final info = terminals[tid];
+  if (info != null && info.excelRow != row) _moveMachine(tid, row);
+  saveRegistry();
+  registryRev.value++;
+}
+
+void approvePending(PendingMachine p, int row, String mid) {
+  if (!rowNames.containsKey(row) || mid.isEmpty) return;
+  pendingMachines.remove(p);
+  if (terminals.containsKey(p.tid)) {
+    saveRegistry();
+    registryRev.value++;
+    return;
+  }
+  if (!merchantList.any((m) => merchantEq(m.mid, mid))) merchantList.add(MerchantEntry(mid, row));
+  _registerMachine(p.tid, row, mid);
+}
+
+void rejectPending(PendingMachine p) {
+  pendingMachines.remove(p);
+  saveRegistry();
+  registryRev.value++;
+}
+
+// ماكينة معروفة (إيصال اتقرا تمام): لو الـ Merchant ID المقروء مطابق لوحدتها بنحفظه في القايمة المنسدلة
+void learnMerchantFor(String tid, List<String> texts) {
   try {
-    final list = [
-      for (final tid in _extraTids)
-        if (terminals[tid] != null)
-          {'tid': tid, 'row': terminals[tid]!.excelRow, 'o': terminals[tid]!.orderNum}
-    ];
-    Directory(baseDir).createSync(recursive: true);
-    File(_extraTermPath).writeAsStringSync(jsonEncode(list));
+    if (machineMerchant.containsKey(tid)) return;
+    final info = terminals[tid];
+    if (info == null) return;
+    final mid = extractMerchantId(texts);
+    if (mid == null || mid.length < 10) return;
+    final r = rowForMerchant(mid);
+    if (r == null || r != info.excelRow) return;
+    if (!merchantList.any((m) => merchantEq(m.mid, mid))) merchantList.add(MerchantEntry(mid, info.excelRow));
+    machineMerchant[tid] = mid;
+    saveRegistry();
+    registryRev.value++;
   } catch (e) {
-    _dbg('extra terminals save error: $e');
+    _dbg('learnMerchantFor error: $e');
   }
 }
 
-// ماكينة جديدة مكتوبة على الإيصال ومش في القايمة: بنربطها بالوحدة (من الـ Merchant ID أو اسم الوحدة)
-// ولو الوحدة مش معروفة منعملش حاجة (الإيصال بيروح للمراجعة زي الأول)
+int _digitDiff(String a, String b) {
+  if (a.length != b.length) return 99;
+  var d = 0;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) d++;
+  }
+  return d;
+}
+
+String? _tidNewRaw(String t) {
+  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,13}\d)", caseSensitive: false).firstMatch(t);
+  if (m == null) return null;
+  final raw = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+  if (raw.length < 8 || raw.length > 9 || raw.startsWith('0011')) return null;
+  final d = raw.substring(raw.length - 8);
+  return tidFix[d] ?? d;
+}
+
+int? _guessRowByName(String name, List<String> texts) {
+  for (final t in texts) {
+    final up = t.toUpperCase();
+    for (final hint in nameHints) {
+      if (hint.key.any((w0) => up.contains(w0))) return hint.value;
+    }
+  }
+  if (name.isNotEmpty) {
+    final k = _normUnit(name);
+    for (final e in rowNames.entries) {
+      final o = _normUnit(e.value);
+      final mx = math.max(o.length, k.length);
+      if (o == k || (mx >= 6 && _editDistance(o, k) <= (mx * 0.15).floor())) return e.key;
+    }
+  }
+  return null;
+}
+
+void _addPending(String tid, String mid, List<String> texts, String note) {
+  for (final p in pendingMachines) {
+    if (p.tid == tid) {
+      if (p.mid != mid && mid.length >= p.mid.length) {
+        p.mid = mid;
+        saveRegistry();
+        registryRev.value++;
+      }
+      return;
+    }
+  }
+  final name = extractUnitName(texts) ?? '';
+  pendingMachines.add(PendingMachine(
+      tid, mid, name, _guessRowByName(name, texts), DateTime.now().toIso8601String().substring(0, 16), note));
+  saveRegistry();
+  registryRev.value++;
+  _dbg('PENDING TERMINAL $tid merchant=$mid name=$name');
+}
+
+// ماكينة جديدة مكتوبة على الإيصال ومش في القايمة:
+//  • Merchant ID مش مقروء -> مفيش ماكينة بتتعمل (الإيصال للمراجعة)
+//  • Merchant ID مقروء ومطابق لوحدة معروفة -> بتتضاف تلقائي تحت الوحدة دي
+//  • Merchant ID أول مرة يظهر (أو الرقم قريب جداً من ماكينة موجودة) -> "في انتظار الموافقة" والإيصال للمراجعة
 String? discoverTerminal(List<String> texts) {
-  final row = findUnitExtraIn(texts);
-  if (row == null || !rowNames.containsKey(row)) return null;
   final counts = <String, int>{};
   for (final t in texts) {
-    final d = _tidLabeledRaw(t);
+    final d = _tidNewRaw(t);
     if (d != null && RegExp(r'^50\d{6}$').hasMatch(d)) counts[d] = (counts[d] ?? 0) + 1;
   }
   if (counts.isEmpty) return null;
@@ -2266,12 +2736,28 @@ String? discoverTerminal(List<String> texts) {
   final tid = best.key;
   if (terminals.containsKey(tid)) return tid;
   if (texts.length >= 2 && best.value < 2) return null; // أكتر من قراءة: لازم الرقم يتكرر مرتين
-  final order = machineCount + 1;
-  terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
-  numToTid[order] = tid;
-  _extraTids.add(tid);
-  _saveExtraTerminals();
-  _dbg('NEW TERMINAL $tid -> ${rowNames[row]} (ماكينة $order)');
+  final mid = extractMerchantId(texts);
+  if (mid == null) {
+    _dbg('NEW TID $tid من غير Merchant ID مقروء -> مراجعة');
+    return null;
+  }
+  String? near;
+  for (final k in terminals.keys) {
+    if (_digitDiff(k, tid) <= 1) {
+      near = k;
+      break;
+    }
+  }
+  final row = rowForMerchant(mid);
+  if (row == null || !rowNames.containsKey(row)) {
+    _addPending(tid, mid, texts, 'Merchant ID أول مرة يظهر');
+    return null;
+  }
+  if (near != null) {
+    _addPending(tid, mid, texts, 'رقمها قريب من ماكينة $near - اتأكد إنها مش غلطة قراءة');
+    return null;
+  }
+  _registerMachine(tid, row, mid);
   return tid;
 }
 
@@ -2282,7 +2768,7 @@ Future<void> prepareDefaultFiles() async {
       await ensureDefaultFiles();
     }
   } catch (_) {}
-  loadExtraTerminals();
+  await loadRegistry();
 }
 
 Future<void> ensureDefaultFiles() async {
@@ -2801,6 +3287,11 @@ String? findTerminalFuzzyIn(List<String> texts, int? targetRow) {
 }
 
 int? findUnitExtraIn(List<String> texts) {
+  final fm = extractMerchantId(texts);
+  if (fm != null) {
+    final r0 = rowForMerchant(fm);
+    if (r0 != null && rowNames.containsKey(r0)) return r0;
+  }
   for (final t in texts) {
     final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", caseSensitive: false)
         .firstMatch(t);
@@ -2959,6 +3450,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     final info = terminals[tid]!;
     row = info.excelRow;
     name = info.unitName;
+    learnMerchantFor(tid, allTexts);
   } else {
     how = 'none';
     final u = findUnitExtraIn(allTexts);
@@ -3037,7 +3529,7 @@ Future<List<File>> extractPdfPages(File pdf) async {
 
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
-final String baseDir = '$root/all';
+final String baseDir = '$root/A2R-POS';
 final String rawImagesDir = '$baseDir/raw_images';
 String outputDir = '$baseDir/output'; // ممكن المستخدم يغيّره من الشاشة
 final String defaultOutputDir = '$baseDir/output';
@@ -3149,6 +3641,17 @@ void saveOutDir(String? f) {
 // بتصلّح اتجاه الـ EXIF وبتدوّر الصورة لو deg != 0. بترجع true لو كتبت ملف جديد.
 bool _fixImage(String src, String dst, int deg) {
   final bytes = File(src).readAsBytesSync();
+  // تسريع: لو مفيش تدوير مطلوب والـ EXIF طبيعي، بننسخ الملف من غير ما نفك الصورة كلها (أسرع بكتير)
+  if (deg == 0) {
+    try {
+      final ex = img.decodeJpgExif(bytes);
+      final o = ex?.imageIfd.orientation ?? 1;
+      if (o == 1) {
+        if (src != dst) File(src).copySync(dst);
+        return false;
+      }
+    } catch (_) {}
+  }
   var im = img.decodeImage(bytes);
   if (im == null) {
     if (src != dst) File(src).copySync(dst);
@@ -3950,6 +4453,196 @@ List<int> fillTemplate(List<int> bytes, Map<int, double> totals, Map<int, int> c
 
 // ───────────────── قنوات النظام (واتساب مباشر / فتح فولدر) ─────────────────
 const MethodChannel _chan = MethodChannel('pos/native');
+
+// ───────── سجل الفحص التلقائي + فتح الإيصال من الإشعار ─────────
+final ValueNotifier<String?> openReqG = ValueNotifier<String?>(null);
+String _lastOpenP = '';
+DateTime _lastOpenAt = DateTime(2000);
+
+// طلب فتح إيصال معين (من الإشعار أو من السجل): "home|مفتاح" أو "mach|مفتاح"
+void requestOpenG(String payload) {
+  final now = DateTime.now();
+  if (payload == _lastOpenP && now.difference(_lastOpenAt).inSeconds < 3) return; // منع التكرار
+  _lastOpenP = payload;
+  _lastOpenAt = now;
+  openReqG.value = '$payload#${now.microsecondsSinceEpoch}';
+}
+
+String? openKeyOf(String? v, String prefix) {
+  if (v == null || !v.startsWith(prefix)) return null;
+  final h = v.lastIndexOf('#');
+  return v.substring(prefix.length, h > prefix.length ? h : v.length);
+}
+
+class AutoLogEntry {
+  final DateTime t;
+  final String tab; // home | mach
+  final String title;
+  final String text;
+  final bool bad;
+  final String? payload;
+  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload);
+  Map<String, dynamic> toJson() =>
+      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload};
+  static AutoLogEntry fromJson(Map<String, dynamic> j) => AutoLogEntry(
+      DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
+      (j['tab'] ?? 'home') as String,
+      (j['title'] ?? '') as String,
+      (j['text'] ?? '') as String,
+      j['bad'] == true,
+      j['p'] as String?);
+}
+
+final List<AutoLogEntry> autoLogG = <AutoLogEntry>[];
+bool _autoLogLoaded = false;
+String get _autoLogPath => '$baseDir/auto_log.json';
+
+void loadAutoLog() {
+  if (_autoLogLoaded) return;
+  _autoLogLoaded = true;
+  try {
+    final f = File(_autoLogPath);
+    if (!f.existsSync()) return;
+    final l = jsonDecode(f.readAsStringSync());
+    if (l is List) {
+      for (final e in l) {
+        if (e is Map) autoLogG.add(AutoLogEntry.fromJson(Map<String, dynamic>.from(e)));
+      }
+    }
+  } catch (_) {}
+}
+
+void _saveAutoLog() {
+  try {
+    Directory(baseDir).createSync(recursive: true);
+    File(_autoLogPath).writeAsStringSync(jsonEncode(autoLogG.map((e) => e.toJson()).toList()));
+  } catch (_) {}
+}
+
+// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
+Future<void> postAutoNotify(
+    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+  loadAutoLog();
+  final payload = openKey == null ? null : '$tab|$openKey';
+  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload));
+  while (autoLogG.length > 300) {
+    autoLogG.removeLast();
+  }
+  _saveAutoLog();
+  try {
+    await _chan.invokeMethod('notify', {
+      'title': tr(title),
+      'text': tr(text),
+      'alert': bad,
+      if (payload != null) 'open': payload,
+    });
+  } catch (_) {}
+}
+
+void showAutoLog(BuildContext context) {
+  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AutoLogPage()));
+}
+
+class AutoLogPage extends StatefulWidget {
+  const AutoLogPage({super.key});
+
+  @override
+  State<AutoLogPage> createState() => _AutoLogPageState();
+}
+
+class _AutoLogPageState extends State<AutoLogPage> {
+  bool onlyBad = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadAutoLog();
+  }
+
+  static String _hm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    bool today(DateTime a) => a.year == now.year && a.month == now.month && a.day == now.day;
+    final list = autoLogG.where((e) => !onlyBad || e.bad).toList();
+    final todayAll = autoLogG.where((e) => today(e.t)).toList();
+    final todayBad = todayAll.where((e) => e.bad).length;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('سجل الفحص التلقائي'),
+        actions: [
+          IconButton(
+            tooltip: tr('مسح السجل'),
+            icon: const Icon(Icons.delete_outline),
+            onPressed: autoLogG.isEmpty
+                ? null
+                : () async {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (c) => AlertDialog(
+                        title: const Text('مسح السجل؟'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لأ')),
+                          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) {
+                      autoLogG.clear();
+                      _saveAutoLog();
+                      if (mounted) setState(() {});
+                    }
+                  },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Row(
+              children: [
+                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} إشعار • $todayBad فيهم مشاكل'))),
+                FilterChip(
+                  label: const Text('مشاكل بس'),
+                  selected: onlyBad,
+                  onSelected: (v) => setState(() => onlyBad = v),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: list.isEmpty
+                ? const Center(child: Text('مفيش إشعارات لسه.'))
+                : ListView.separated(
+                    itemCount: list.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (c, i) {
+                      final e = list[i];
+                      final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
+                      return ListTile(
+                        leading: Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
+                            color: e.bad ? Colors.orange : Colors.green),
+                        title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
+                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')}\n${tr(e.text)}'),
+                        isThreeLine: true,
+                        trailing: e.payload != null ? const Icon(Icons.chevron_left) : null,
+                        onTap: e.payload == null
+                            ? null
+                            : () {
+                                Navigator.of(context).pop();
+                                requestOpenG(e.payload!);
+                              },
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 String todayToken() {
   final n = DateTime.now();
@@ -4801,6 +5494,27 @@ Future<void> askBatteryExempt({bool force = false}) async {
   } catch (_) {}
 }
 
+// لو إذن الإشعارات مقفول: مفيش إشعار هيظهر وانت برا التطبيق. بنقولك وبنفتحلك الإعدادات
+Future<void> ensureNotifPerm(BuildContext context) async {
+  try {
+    var st = await Permission.notification.status;
+    if (!st.isGranted) st = await Permission.notification.request();
+    if (st.isGranted) return;
+  } catch (_) {
+    return;
+  }
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: w.Text(tr('الإشعارات مقفولة للتطبيق، فمش هيجيلك إشعار النتيجة وانت برا التطبيق. فعّلها من الإعدادات.')),
+    duration: const Duration(seconds: 12),
+    action: SnackBarAction(
+        label: tr('الإعدادات'),
+        onPressed: () {
+          openAppSettings();
+        }),
+  ));
+}
+
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
 // كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
@@ -4909,18 +5623,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool autoScan = false;
   bool settingsOpen = false;
   Timer? _autoTimer;
-  String _doneSig = '';
-  String _pendSig = '';
+  Set<String> _quickPend = <String>{}; // ملفات جديدة لسه حجمها بيتغير (التنزيل ما خلصش)
+  bool _fullRunning = false; // فحص يدوي كامل شغال أو بيبدأ: الفحص الخفيف يستنى
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    autoScan = _readCfg()['autoScan'] == true;
-    homeAutoG = autoScan;
+    // الفحص الخفيف مقفول افتراضياً في كل تشغيل: مفيش مراقبة ولا خدمة خلفية إلا لما تفعّله بإيدك
+    autoScan = false;
+    homeAutoG = false;
+    final cfg0 = _readCfg();
+    if (cfg0['autoScan'] == true) {
+      cfg0['autoScan'] = false;
+      _writeCfg(cfg0);
+    }
     homeRunG = () => runFullPipeline();
     homeSumG = _countLine;
-    if (autoScan) _startAuto();
+    openReqG.addListener(_onOpenReqHome);
+    stopKeepAliveSafe();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
@@ -5047,6 +5768,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+    // رجعت للتطبيق: نعرض هل المراقبة كانت شغالة وانت برا (تشخيص)
+    if (state == AppLifecycleState.resumed && autoScan && !busy && _lastTickAt != null && mounted) {
+      final ago = DateTime.now().difference(_lastTickAt!).inSeconds;
+      setState(() => status = ago <= 30
+          ? 'المراقبة شغالة ✓ (آخر مرور على المجلد من $ago ثانية).'
+          : '⚠️ المراقبة كانت واقفة وانت برا التطبيق (آخر مرور من ${ago ~/ 60} دقيقة). النظام وقّف التطبيق في الخلفية.');
+    }
   }
 
   @override
@@ -5055,22 +5783,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     homeRunG = null;
     homeSumG = null;
     homeAutoG = false;
+    openReqG.removeListener(_onOpenReqHome);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  // ───── فحص تلقائي: بيراقب الصور الجديدة ويفحصها لوحده (بيستنى لحد ما الصور تخلص تنزيل) ─────
-  String _scanSig() {
-    try {
-      final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
-      final now = DateTime.now();
-      final cutoff = days < 0
-          ? DateTime(2000)
-          : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
-      var n = 0, size = 0, latest = 0;
-      for (final d in dirs) {
+  void _onOpenReqHome() {
+    final key = openKeyOf(openReqG.value, 'home|');
+    if (key != null) _openByKeyHome(key, 0);
+  }
+
+  // بيفتح شاشة تعديل الإيصال اللي جه عنه الإشعار (لو الفحص لسه شغال بيستنى يخلص)
+  Future<void> _openByKeyHome(String key, int tries) async {
+    if (!mounted) return;
+    ReceiptItem? it;
+    for (final e in processedItems) {
+      if (e.key == key) {
+        it = e;
+        break;
+      }
+    }
+    if (it == null || busy) {
+      if (tries < 15) {
+        await Future.delayed(const Duration(milliseconds: 600));
+        return _openByKeyHome(key, tries + 1);
+      }
+      return;
+    }
+    await editReceipt(it);
+  }
+
+  // ───── فحص تلقائي خفيف: بيفحص الملف الجديد بس وبيبعتلك إشعار بالنتيجة (من غير ما تفتح التطبيق) ─────
+  // صور الفترة المحددة اللي لسه ما اتفحصتش (مفتاح كل ملف "الاسم:الحجم")، مرتبة بوقت التعديل
+  Map<String, File> _quickCandidates() {
+    final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
+    final now = DateTime.now();
+    final cutoff = days < 0
+        ? DateTime(2000)
+        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+    final have = loadQuickSeen();
+    final found = <File>[];
+    final keyOf = <String, String>{};
+    for (final d in dirs) {
+      try {
         for (final e in d.listSync().whereType<File>()) {
           final lower = e.path.toLowerCase();
           if (!(lower.endsWith('.jpg') ||
@@ -5081,18 +5838,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
           final b = baseName(e.path);
           if (b.startsWith('.') || b.startsWith('dup_')) continue;
-          final fd = fileDate(e);
-          if (fd.isBefore(cutoff)) continue;
-          n++;
-          size += e.lengthSync();
-          final ms = fd.millisecondsSinceEpoch;
-          if (ms > latest) latest = ms;
+          if (fileDate(e).isBefore(cutoff)) continue;
+          final k = quickKeyOf(e);
+          if (k.endsWith(':0') || have.contains(k)) continue;
+          keyOf[e.path] = k;
+          found.add(e);
         }
-      }
-      return n == 0 ? '' : '$n:$size:$latest';
-    } catch (_) {
-      return '';
+      } catch (_) {}
     }
+    found.sort((x, y) {
+      try {
+        return x.lastModifiedSync().compareTo(y.lastModifiedSync());
+      } catch (_) {
+        return 0;
+      }
+    });
+    final out = <String, File>{};
+    for (final f in found) {
+      out[keyOf[f.path]!] = f;
+    }
+    return out;
+  }
+
+  // أول تشغيل: الملفات الموجودة دلوقتي تعتبر اتفحصت (baseline)، والإشعارات للجديد بس
+  void _quickEnsureBaseline() {
+    if (quickHasBaseline()) return;
+    final keys = <String>[];
+    try {
+      keys.addAll(_quickCandidates().keys);
+    } catch (_) {}
+    quickMarkSeen(keys);
   }
 
   Future<void> _watchService(bool on) async {
@@ -5101,14 +5876,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _chan.invokeMethod('startKeepAlive',
             {'title': 'A2R POS', 'text': 'مراقبة الإيصالات الجديدة...'});
       } else {
-        await _chan.invokeMethod('stopKeepAlive');
+        await stopKeepAliveSafe();
       }
     } catch (_) {}
   }
 
   void _startAuto() {
     _autoTimer?.cancel();
-    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _quickPend = <String>{};
+    _quickEnsureBaseline();
+    _autoTimer = Timer.periodic(const Duration(seconds: 2), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -5118,19 +5895,176 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _watchService(false);
   }
 
+  DateTime? _lastTickAt; // آخر مرة المراقبة اشتغلت (لتشخيص: هل كانت شغالة وانت برا التطبيق؟)
+  String _lastDirSig = '';
+  int _idleTicks = 0;
+
+  // توقيع خفيف للمجلدات (وقت تعديل المجلد نفسه): لو ما اتغيرش مفيش داعي نلف على آلاف الملفات
+  String _dirSig() {
+    try {
+      final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
+      return dirs.map((d) => '${d.path}:${d.statSync().modified.millisecondsSinceEpoch}').join('|');
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _autoTick() async {
-    if (!mounted || !autoScan || busy || chainRunning || machBusyG) return;
-    final sig = _scanSig();
-    if (sig.isEmpty || sig == _doneSig) {
-      _pendSig = '';
+    _lastTickAt = DateTime.now();
+    if (!mounted || !autoScan || busy || _fullRunning || chainRunning || machBusyG || quickBusyG) return;
+    final ds = _dirSig();
+    if (ds.isNotEmpty && ds == _lastDirSig && _quickPend.isEmpty && ++_idleTicks < 15) return; // فحص كامل كل 30 ثانية على الأقل
+    _idleTicks = 0;
+    _lastDirSig = ds;
+    if (!quickHasBaseline()) {
+      _quickEnsureBaseline();
       return;
     }
-    if (sig != _pendSig) {
-      _pendSig = sig; // لسه الصور بتنزل: نستنى الدورة الجاية
+    final Map<String, File> cur;
+    try {
+      cur = _quickCandidates();
+    } catch (_) {
       return;
     }
-    _pendSig = '';
-    await runFullPipeline(auto: true);
+    // الملف جاهز لما مفتاحه (الاسم:الحجم) يتكرر في دورتين ورا بعض = التنزيل خلص
+    final ready = cur.entries.where((e) => _quickPend.contains(e.key)).toList();
+    _quickPend = cur.keys.toSet();
+    if (ready.isEmpty) return;
+    if (ready.length > _kQuickBulk) {
+      quickMarkSeen(ready.map((e) => e.key));
+      _quickPend.removeAll(ready.map((e) => e.key));
+      await _quickNotify(['⚠️ ظهر ${ready.length} ملف مرة واحدة (غالباً الفترة أو الفولدر اتغيّر) - ما فحصتهمش تلقائي، افحصهم بإيدك']);
+      return;
+    }
+    await _liteScan(ready);
+  }
+
+  // الفحص الخفيف = نفس فحص التقفيل بالظبط (نفس القراءة والتكرار والترقيم والتسمية والمراجعة)
+  // من غير بناء الإكسيل والـ PDF. الصور القديمة بتتاخد من الكاش فمبتتقراش تاني، فالمستهلك بس الصور الجديدة.
+  Future<void> _liteScan(List<MapEntry<String, File>> ready) async {
+    if (quickBusyG) return;
+    quickBusyG = true;
+    final lines = <String>[];
+    String? openKey;
+    var openBad = false;
+    try {
+      final keys = ready.map((e) => e.key).toSet();
+      await runFullPipeline(auto: true, lite: true);
+      quickMarkSeen(keys);
+      if (!mounted) return;
+      for (final en in ready) {
+        final name = baseName(en.value.path);
+        if (warnings.any((x) => x.startsWith('$name: فشلت القراءة'))) {
+          lines.add('⚠️ فشل الفحص التلقائي ($name) - افحصه بإيدك');
+        }
+      }
+      for (final it in processedItems) {
+        if (!keys.contains(it.key)) continue;
+        final l = _liteLine(it);
+        if (l != null) {
+          lines.add(l);
+          final isBad = l.startsWith('⚠️');
+          if (openKey == null || (isBad && !openBad)) {
+            openKey = it.key;
+            openBad = isBad;
+          }
+        }
+      }
+      // صور السيستم الجديدة (A2R Operations Console): مش باتش فمش في processedItems، فبنعمل لها سطر إشعار لوحدها
+      final newNames = ready.map((e) => baseName(e.value.path)).toSet();
+      for (final sy in sysReads) {
+        if (!newNames.contains(sy.file)) continue;
+        final t = sy.tid != null ? terminals[sy.tid] : null;
+        final label = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
+        if (sy.amount == null) {
+          lines.add('⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - راجعها');
+          continue;
+        }
+        var tot = 0.0;
+        var has = false;
+        if (t != null) {
+          for (final x in processedItems) {
+            if (x.counts && x.amount > 0 && x.orderNum == t.orderNum) {
+              tot += x.amount;
+              has = true;
+            }
+          }
+        }
+        final amt = sy.amount!.toStringAsFixed(2);
+        if (!has) {
+          lines.add('🖥️ صورة سيستم $label: $amt ج.م (لسه مفيش باتش للمقارنة)');
+        } else {
+          final d = round2(tot - sy.amount!);
+          lines.add(d == 0
+              ? '✅ صورة سيستم $label: $amt ج.م - مطابق للباتشات'
+              : '⚠️ صورة سيستم $label: $amt ج.م - فرق ${d.toStringAsFixed(2)} عن مجموع الباتشات');
+        }
+      }
+    } catch (e) {
+      _dbg('LITE_FAIL $e');
+    } finally {
+      quickBusyG = false;
+    }
+    if (lines.isNotEmpty) await _quickNotify(lines, openKey: openKey);
+  }
+
+  // سطر النتيجة لكل إيصال جديد (من نتيجة فحص التقفيل نفسها)
+  String? _liteLine(ReceiptItem it) {
+    if (it.userExcluded) return null;
+    final name = baseName(it.path);
+    if (it.ignoredDoc) return '⚠️ $name: شكله إيصال دفع/مستند مش باتش - راجعه';
+    final label = it.orderNum != null
+        ? 'ماكينة ${it.orderNum}${it.suffix != null ? ' (باتش ${it.suffix})' : ''}${it.unitName != null ? ' - ${it.unitName}' : ''}'
+        : (it.unitName ?? name);
+    final why = <String>[];
+    if (it.reprintSummary) why.add('REPRINT/SUMMARY (إعادة طباعة/ملخص)');
+    if (it.missingBatchClosed && !it.reprintSummary) why.add('مش مكتوب BATCH CLOSED');
+    if (it.row == null) {
+      why.add('الماكينة/الوحدة مش معروفة');
+    } else if (it.weakId) {
+      why.add('الماكينة اتحددت تلقائي - اتأكد منها');
+    }
+    if (it.how == 'extra-batch') why.add('الماكينة ظهرت قبل كده بمبلغ مختلف - اتحسبت باتش إضافي');
+    if (it.amount <= 0) {
+      why.add('مش قادر أقرا المبلغ');
+    } else if (it.alt != null) {
+      why.add('قراءتين مختلفتين للمبلغ (${it.amount.toStringAsFixed(2)} و ${it.alt!.toStringAsFixed(2)})');
+    } else if (!it.ok) {
+      why.add('المبلغ غير مؤكد');
+    }
+    if (it.dupSuspect) why.add('مشكوك إنه مكرر (نفس الماكينة ونفس المبلغ)');
+    if (it.dateOdd) why.add('تاريخه ${it.date} والأغلب ${it.dateMain}');
+    if (it.unusual != null) why.add(it.unusual!);
+    final amt = it.amount > 0 ? ' (${it.amount.toStringAsFixed(2)} ج.م)' : '';
+    if (why.isEmpty) return '✅ $label تمام$amt';
+    return '⚠️ $label$amt: ${why.join('، ')}';
+  }
+
+  // لو التطبيق على الشاشة: SnackBar. غير كده: إشعار. ودايماً آخر نتيجة في مربع الحالة.
+  Future<void> _quickNotify(List<String> lines, {String? openKey}) async {
+    final text = lines.join('\n');
+    final bad = lines.any((l) => l.startsWith('⚠️'));
+    final now = DateTime.now();
+    final hm = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    if (mounted && !busy) {
+      setState(() => status = 'آخر فحص تلقائي ($hm):\n$text');
+    }
+    // داخل التطبيق: SnackBar لو التطبيق ظاهر، وإشعار التليفون دايماً (ظاهر أو لأ)
+    if (mounted && _life == AppLifecycleState.resumed) {
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: w.Text(tr(text)),
+          duration: Duration(seconds: bad ? 8 : 4),
+        ));
+      } catch (_) {}
+    }
+    await postAutoNotify(
+      tab: 'home',
+      title: '${bad ? '⚠️' : '✅'} A2R POS - فحص تلقائي${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}',
+      text: text,
+      bad: bad,
+      openKey: openKey,
+    );
   }
 
   Future<void> _setAuto(bool v) async {
@@ -5140,9 +6074,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     cfg['autoScan'] = v;
     _writeCfg(cfg);
     if (v) {
-      _doneSig = '';
+      await ensureNotifPerm(context);
+      try {
+        final st = await Permission.manageExternalStorage.status;
+        if (!st.isGranted) await Permission.manageExternalStorage.request();
+      } catch (_) {}
+      await askBatteryExempt(force: true);
+      if (!mounted || !autoScan) return;
       _startAuto();
-      await askBatteryExempt();
+      if (!busy) {
+        setState(() => status = 'الفحص التلقائي شغال: أي إيصال جديد هيتفحص لوحده وهيجيلك إشعار بالنتيجة.');
+      }
     } else {
       _stopAuto();
     }
@@ -5635,8 +6577,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         text: item.orderNum != null ? 'ماكينة ${item.orderNum}' : baseName(item.path));
   }
 
-  Future<void> rebuildFiles() async {
-    setState(() => status = 'جاري توليد الملفات وتحديث الشيتات...');
+  Future<void> rebuildFiles({bool lite = false}) async {
+    setState(() => status = lite ? 'جاري تحديث النتائج (فحص خفيف)...' : 'جاري توليد الملفات وتحديث الشيتات...');
     final dateCounts = <String, int>{};
     for (final r in processedItems) {
       if (r.date != null) {
@@ -5662,6 +6604,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (r.counts && r.date != null && r.date != reportDate) {
         otherByDate.putIfAbsent(r.date!, () => <ReceiptItem>[]).add(r);
       }
+    }
+    // الفحص الخفيف: نفس الحسابات (الناقص + التقرير + غير المعتاد) من غير بناء الـ PDF ولا الإكسيل
+    if (lite) {
+      final ignoreL = <int>{};
+      try {
+        for (final m in RegExp(r'\d+').allMatches(File('$baseDir/ignore.txt').readAsStringSync())) {
+          ignoreL.add(int.parse(m.group(0)!));
+        }
+      } catch (_) {}
+      final foundL = mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
+      missingTerminals = [
+        for (var i = 1; i <= 19; i++)
+          if (!foundL.contains(i) && !ignoreL.contains(i) && !offTids.contains(numToTid[i])) i
+      ];
+      writeReport(reportDate);
+      setState(() => status = 'تم فحص خفيف: ${_countLine()}\n'
+          '• من غير بناء الإكسيل والـ PDF (اضغط "فحص التقفيل" لبنائهم).' +
+          (sourceNote.isEmpty ? '' : '\n$sourceNote'));
+      return;
     }
     var pageNo = 0;
     Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
@@ -5767,7 +6728,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [
       for (var i = 1; i <= 19; i++)
-        if (!foundOrders.contains(i) && !ignore.contains(i)) i
+        if (!foundOrders.contains(i) && !ignore.contains(i) && !offTids.contains(numToTid[i])) i
     ];
     writeReport(reportDate);
 
@@ -6040,25 +7001,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  Future<void> runFullPipeline({List<String>? manualPaths, bool auto = false}) async {
-    if (manualPaths == null) _doneSig = _scanSig();
-    if (!auto && !chainRunning) {
+  // lite = الفحص الخفيف: نفس خطوات فحص التقفيل بالظبط (قراءة + تكرار + ترقيم + تسمية + مراجعة)
+  // لكن من غير بناء الإكسيل والـ PDF، ومن غير طلب أذونات ولا إبقاء الشاشة شغالة
+  Future<void> runFullPipeline({List<String>? manualPaths, bool auto = false, bool lite = false}) async {
+    _fullRunning = true;
+    if (!lite) await waitQuickIdle(); // لو الفحص الخفيف شغال نستناه يخلص
+    if (!lite && !auto && !chainRunning) {
       try {
         await Permission.notification.request();
       } catch (_) {}
       await askBatteryExempt();
     }
-    try {
-      await _chan.invokeMethod('startKeepAlive',
-          {'title': 'A2R POS', 'text': 'جاري فحص الإيصالات...'});
-    } catch (_) {}
-    try {
-      await _chan.invokeMethod('keepScreenOn', {'on': true});
-    } catch (_) {}
+    if (!lite) {
+      try {
+        await _chan.invokeMethod('startKeepAlive',
+            {'title': 'A2R POS', 'text': 'جاري فحص الإيصالات...'});
+      } catch (_) {}
+      try {
+        await _chan.invokeMethod('keepScreenOn', {'on': true});
+      } catch (_) {}
+    }
     final sw = Stopwatch()..start();
     try {
-      await _runPipelineInner(manualPaths: manualPaths);
+      await _runPipelineInner(manualPaths: manualPaths, lite: lite);
     } finally {
+      _fullRunning = false;
       sw.stop();
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
@@ -6066,16 +7033,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (autoScan) {
         await _watchService(true); // نفضل شغالين نراقب الإيصالات الجديدة
       } else if (!chainRunning) {
-        try {
-          await _chan.invokeMethod('stopKeepAlive');
-        } catch (_) {}
+        await stopKeepAliveSafe(); // ما نقفلش الخدمة لو تاب تاني فيه فحص تلقائي
       }
-      if (!chainRunning) {
+      if (!lite && !chainRunning) {
         try {
           await _chan.invokeMethod('keepScreenOn', {'on': false});
         } catch (_) {}
       }
-      if (_life != AppLifecycleState.resumed && !chainRunning) {
+      if (!lite && _life != AppLifecycleState.resumed && !chainRunning) {
         final rv = processedItems.where((e) => e.needsReview).length;
         final txt = 'تم فحص ${processedItems.length} إيصال'
             '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
@@ -6088,9 +7053,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _runPipelineInner({List<String>? manualPaths}) async {
-    final perm = await Permission.manageExternalStorage.request();
-    if (!perm.isGranted) {
+  Future<void> _runPipelineInner({List<String>? manualPaths, bool lite = false}) async {
+    final granted = lite
+        ? await Permission.manageExternalStorage.isGranted
+        : (await Permission.manageExternalStorage.request()).isGranted;
+    if (!granted) {
       setState(() => status = 'يجب منح إذن الوصول إلى جميع الملفات للمتابعة.');
       return;
     }
@@ -6200,6 +7167,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
+    // الفحص التلقائي الخفيف: الملفات دي هتتفحص هنا، فنعتبرها اتفحصت علشان ما يجيش عنها إشعار تاني
+    try {
+      quickMarkSeen(todo.where((f) => dirs.any((d) => f.parent.path == d.path)).map(quickKeyOf));
+    } catch (_) {}
+
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
@@ -6245,6 +7217,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
 
+    // تسريع: نسخ/تصحيح صور الإيصالات المحفوظة في الكاش بيتجهز بالتوازي (3 مع بعض) قبل ما اللفة توصل لها
+    final preFix = <String, Future<bool>>{};
+    {
+      var running = 0;
+      final waiters = <Completer<void>>[];
+      Future<bool> limited(Future<bool> Function() job) async {
+        while (running >= 3) {
+          final c = Completer<void>();
+          waiters.add(c);
+          await c.future;
+        }
+        running++;
+        try {
+          return await job();
+        } catch (_) {
+          return false;
+        } finally {
+          running--;
+          if (waiters.isNotEmpty) waiters.removeAt(0).complete();
+        }
+      }
+
+      final usedDst = <String>{};
+      for (final f in todo) {
+        try {
+          final ck = '${baseName(f.path)}:${f.lengthSync()}';
+          final c = _scanCache[ck];
+          if (c is! Map || c['v'] != _kScanVer || c['k'] != 'receipt' || c['rot'] is! int) continue;
+          final ct = c['tid'];
+          if (ct is String && !terminals.containsKey(ct)) continue;
+          final inRaw = f.path.startsWith('$rawImagesDir/');
+          final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+          final noExt = dst.contains('.') ? dst.substring(0, dst.lastIndexOf('.')) : dst;
+          final jd = '$noExt.jpg';
+          if (!usedDst.add(jd)) continue; // نفس الاسم من مصدرين: يتعمل بالترتيب زي الأول
+          final rot = c['rot'] as int;
+          final src = f.path;
+          preFix[src] = limited(() => fixImageAsync(src, jd, rot));
+        } catch (_) {}
+      }
+    }
+
     // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
@@ -6285,7 +7299,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               if (rot is int) {
                 final noExtC = dstC.contains('.') ? dstC.substring(0, dstC.lastIndexOf('.')) : dstC;
                 final jdC = '$noExtC.jpg';
-                await fixImageAsync(f.path, jdC, rot);
+                await (preFix[f.path] ?? fixImageAsync(f.path, jdC, rot));
                 if (jdC != dstC && inRawC) {
                   try {
                     File(dstC).deleteSync();
@@ -6304,10 +7318,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               processedItems.add(cItem);
             }
             if (!mounted) return;
-            setState(() {
-              progress = ((i + 1) / todo.length) * 0.5;
-              status = 'فحص OCR: ${i + 1} من ${todo.length} (محفوظ)';
-            });
+            if (i % 10 == 0 || i == todo.length - 1) {
+              setState(() {
+                progress = ((i + 1) / todo.length) * 0.5;
+                status = 'فحص OCR: ${i + 1} من ${todo.length} (محفوظ)';
+              });
+            }
             continue;
           }
         }
@@ -6662,7 +7678,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     dropProvisional();
     processedItems.addAll(kept);
     processedItems.addAll(ignoredItems);
-    await rebuildFiles();
+    await rebuildFiles(lite: lite);
     try {
       Directory(tmpDir).deleteSync(recursive: true);
     } catch (_) {}
@@ -6740,7 +7756,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _switchRow('فحص تلقائي (بيراقب الإيصالات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
+            _switchRow('فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             const Divider(height: 4),
             _sourceChips(context,
                 busy: busy,
@@ -8008,6 +9024,8 @@ class MCollector {
     r.tid = tc.isNotEmpty
         ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
         : (findTerminalIn([all]) ?? discoverTerminal([all]));
+    final lt0 = r.tid;
+    if (lt0 != null) learnMerchantFor(lt0, [all]);
 
     // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
     if (days.isEmpty) {
@@ -8330,6 +9348,8 @@ MIdent _identify(String all) {
   r.tid = tc.isNotEmpty
       ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
       : (findTerminalIn([all]) ?? discoverTerminal([all]));
+  final lt0 = r.tid;
+  if (lt0 != null) learnMerchantFor(lt0, [all]);
   final days = <String, int>{};
   for (final m in _dateRe.allMatches(all)) {
     final k = _dayKey(m.group(0)!);
@@ -9923,14 +10943,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (on) {
         await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'مراقبة الإيصالات الجديدة...'});
       } else {
-        await _chan.invokeMethod('stopKeepAlive');
+        await stopKeepAliveSafe();
       }
     } catch (_) {}
   }
 
   void _startAuto() {
     _autoTimer?.cancel();
-    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _autoTimer = Timer.periodic(const Duration(seconds: 2), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -9940,8 +10960,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     _watchService(homeAutoG);
   }
 
+  String _lastDirSigM = '';
+  int _idleTicksM = 0;
+
+  String _dirSigM() {
+    try {
+      final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
+      return dirs.map((d) => '${d.path}:${d.statSync().modified.millisecondsSinceEpoch}').join('|');
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _autoTick() async {
-    if (!mounted || !autoScan || busy || chainRunning || homeBusyG) return;
+    if (!mounted || !autoScan || busy || chainRunning || homeBusyG || quickBusyG) return;
+    final ds = _dirSigM();
+    if (ds.isNotEmpty && ds == _lastDirSigM && _pendSig.isEmpty && ++_idleTicksM < 15) return;
+    _idleTicksM = 0;
+    _lastDirSigM = ds;
     final sig = _scanSig();
     if (sig.isEmpty || sig == _doneSig) {
       _pendSig = '';
@@ -9952,7 +10988,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       return;
     }
     _pendSig = '';
-    await _startCountAll(auto: true);
+    await _liteCount();
   }
 
   Future<void> _setAuto(bool v) async {
@@ -9962,12 +10998,91 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     cfg['autoScanM'] = v;
     _writeCfg(cfg);
     if (v) {
-      _doneSig = '';
-      _startAuto();
+      await ensureNotifPerm(context);
+      try {
+        final st = await Permission.manageExternalStorage.status;
+        if (!st.isGranted) await Permission.manageExternalStorage.request();
+      } catch (_) {}
       await askBatteryExempt();
+      if (!mounted || !autoScan) return;
+      _doneSig = _scanSig(); // الملفات الموجودة دلوقتي مش هتتفحص تلقائي، الجديد بس
+      _pendSig = '';
+      _startAuto();
+      setState(() => status = 'الفحص التلقائي الخفيف شغال: أي PDF جديد هيتعدّ لوحده وهيجيلك إشعار بالنتيجة.');
     } else {
       _stopAuto();
     }
+  }
+
+  // ───── الفحص الخفيف: بيعدّ الملفات الجديدة بس (تسمية + عدّ) ويبعتلك إشعار، من غير ما يلمس القديم ───────
+  List<MResult> _liteNew = <MResult>[];
+
+  Future<void> _liteCount() async {
+    if (quickBusyG || busy) return;
+    quickBusyG = true;
+    _liteNew = <MResult>[];
+    _doneSig = _scanSig();
+    try {
+      await start(count: true, lite: true);
+    } catch (e) {
+      _dbg('LITE_M_FAIL $e');
+    } finally {
+      quickBusyG = false;
+    }
+    if (!mounted || !autoScan) return;
+    final lines = <String>[];
+    String? openKey;
+    var openBad = false;
+    for (final r in _liteNew) {
+      final l = _liteLine(r);
+      if (l != null) {
+        lines.add(l);
+        final isBad = l.startsWith('⚠️');
+        if (openKey == null || (isBad && !openBad)) {
+          openKey = r.key;
+          openBad = isBad;
+        }
+      }
+    }
+    if (lines.isNotEmpty) await _liteNotify(lines, openKey: openKey);
+  }
+
+  String? _liteLine(MResult r) {
+    if (r.excluded) return null;
+    final nm = r.newName ?? r.pdfName;
+    final why = <String>[];
+    if (r.pending) why.add('لسه ما اتعدّش');
+    if (!r.ok) why.addAll(r.notes.take(2));
+    final d = _batchDiff(r);
+    if (d != null && d != 0) {
+      why.add(d > 0 ? 'ناقص $d عن عدد معاملات الباتش' : 'زيادة ${-d} عن عدد معاملات الباتش');
+    }
+    if (r.softWarn && why.isEmpty) why.add('فرق بسيط عن المتوقع - راجعه');
+    if (!r.ok && why.isEmpty) why.add(r.seqBad ? 'العدد مختلف عن تسلسل الإيصالات' : 'محتاج مراجعة');
+    final cnt = r.count >= 0 ? '${r.count} إيصال' : '';
+    if (why.isEmpty) return '✅ $nm: $cnt';
+    return '⚠️ $nm${cnt.isEmpty ? '' : ' ($cnt)'}: ${why.join('، ')}';
+  }
+
+  Future<void> _liteNotify(List<String> lines, {String? openKey}) async {
+    final text = lines.join('\n');
+    final bad = lines.any((l) => l.startsWith('⚠️'));
+    // داخل التطبيق: SnackBar لو التطبيق ظاهر، وإشعار التليفون دايماً (ظاهر أو لأ)
+    if (mounted && _life == AppLifecycleState.resumed) {
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: w.Text(tr(text)),
+          duration: Duration(seconds: bad ? 8 : 4),
+        ));
+      } catch (_) {}
+    }
+    await postAutoNotify(
+      tab: 'mach',
+      title: '${bad ? '⚠️' : '✅'} A2R POS - فحص إيصالات الدفع${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}',
+      text: text,
+      bad: bad,
+      openKey: openKey,
+    );
   }
 
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
@@ -10020,11 +11135,17 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     pdfDir = loadPdfDir();
-    autoScan = _readCfg()['autoScanM'] == true;
-    machAutoG = autoScan;
+    // الفحص الخفيف مقفول افتراضياً في كل تشغيل: مفيش مراقبة ولا خدمة خلفية إلا لما تفعّله بإيدك
+    autoScan = false;
+    machAutoG = false;
+    final cfgM = _readCfg();
+    if (cfgM['autoScanM'] == true) {
+      cfgM['autoScanM'] = false;
+      _writeCfg(cfgM);
+    }
     machRunG = () => _startCountAll();
     machSumG = _countLine;
-    if (autoScan) _startAuto();
+    openReqG.addListener(_onOpenReqM);
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
@@ -10045,6 +11166,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     machRunG = null;
     machSumG = null;
     machAutoG = false;
+    openReqG.removeListener(_onOpenReqM);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     closingTxn.removeListener(_onClosing);
@@ -10082,6 +11204,30 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   void _onClosing() {
     if (mounted) setState(() {});
+  }
+
+  void _onOpenReqM() {
+    final key = openKeyOf(openReqG.value, 'mach|');
+    if (key != null) _openByKeyM(key, 0);
+  }
+
+  Future<void> _openByKeyM(String key, int tries) async {
+    if (!mounted) return;
+    MResult? it;
+    for (final r in results) {
+      if (r.key == key) {
+        it = r;
+        break;
+      }
+    }
+    if (it == null || busy) {
+      if (tries < 15) {
+        await Future.delayed(const Duration(milliseconds: 600));
+        return _openByKeyM(key, tries + 1);
+      }
+      return;
+    }
+    await openPdf(it.openPath);
   }
 
   Future<void> openPdf(String? path) async {
@@ -10383,26 +11529,32 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // ───── التشغيل ─────
-  Future<void> start({bool resumeOnly = false, bool count = false, List<String>? manualPaths}) async {
+  // lite = الفحص الخفيف: من غير أذونات ولا إبقاء الشاشة شغالة ولا تغيير نص الخدمة، ومبيعدّش غير الملفات الجديدة
+  Future<void> start({bool resumeOnly = false, bool count = false, List<String>? manualPaths, bool lite = false}) async {
     if (busy) return;
-    final perm = await Permission.manageExternalStorage.request();
-    if (!perm.isGranted) {
-      setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
+    if (!lite) await waitQuickIdle(); // لو الفحص الخفيف شغال نستناه يخلص
+    final granted = lite
+        ? await Permission.manageExternalStorage.isGranted
+        : (await Permission.manageExternalStorage.request()).isGranted;
+    if (!granted) {
+      if (!lite) setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
       return;
     }
-    try {
-      await Permission.notification.request();
-    } catch (_) {}
-    try {
-      await _chan.invokeMethod(
-          'startKeepAlive', {'title': 'A2R POS', 'text': 'جاري فحص إيصالات الدفع...'});
-    } catch (_) {}
-    try {
-      await _chan.invokeMethod('keepScreenOn', {'on': true});
-    } catch (_) {}
+    if (!lite) {
+      try {
+        await Permission.notification.request();
+      } catch (_) {}
+      try {
+        await _chan.invokeMethod(
+            'startKeepAlive', {'title': 'A2R POS', 'text': 'جاري فحص إيصالات الدفع...'});
+      } catch (_) {}
+      try {
+        await _chan.invokeMethod('keepScreenOn', {'on': true});
+      } catch (_) {}
+    }
     final sw = Stopwatch()..start();
     try {
-      await _run(resumeOnly, count, manualPaths: manualPaths);
+      await _run(resumeOnly, count, manualPaths: manualPaths, lite: lite);
     } finally {
       sw.stop();
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
@@ -10411,16 +11563,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (autoScan) {
         await _watchService(true); // نفضل شغالين نراقب الملفات الجديدة
       } else if (!chainRunning) {
-        try {
-          await _chan.invokeMethod('stopKeepAlive');
-        } catch (_) {}
+        await stopKeepAliveSafe(); // ما نقفلش الخدمة لو تاب التقفيل فيه فحص تلقائي
       }
-      if (!chainRunning) {
+      if (!lite && !chainRunning) {
         try {
           await _chan.invokeMethod('keepScreenOn', {'on': false});
         } catch (_) {}
       }
-      if (_life != AppLifecycleState.resumed && !chainRunning) {
+      if (!lite && _life != AppLifecycleState.resumed && !chainRunning) {
         final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
         try {
           await _chan.invokeMethod('notify', {
@@ -10432,7 +11582,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
-  Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths}) async {
+  Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths, bool lite = false}) async {
     await prepareDefaultFiles();
     setState(() {
       busy = true;
@@ -10465,7 +11615,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
       _dbg('PHASE1 start resumeOnly=$resumeOnly');
       namingDone = resumeOnly;
+      final beforeKeys = results.map((r) => r.key).toSet();
       if (!resumeOnly) idle = await _identifyAll(rec, manualPaths: manualPaths);
+      if (lite) _liteNew = results.where((r) => !beforeKeys.contains(r.key)).toList();
       _dbg('PHASE1 done');
       if (mounted) setState(() => namingDone = true);
 
@@ -10476,7 +11628,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         _dbg('PHASE2 start');
         rec = TextRecognizer(script: TextRecognitionScript.latin);
         recClosed = false;
-        await _countAll(rec);
+        await _countAll(rec, only: lite ? _liteNew.toSet() : null);
         _dbg('PHASE2 done');
       }
       _flagDuplicates();
@@ -10834,7 +11986,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     setState(() => status = '$_curLabel • صفحة $pg${total != null ? ' / $total' : ''}');
   }
 
-  Future<void> _countAll(TextRecognizer rec) async {
+  Future<void> _countAll(TextRecognizer rec, {Set<MResult>? only}) async {
     // ملف التطبيق اتقفل أثناء عدّه 3 مرات: نعدّيه بدل ما نلف في دايرة
     for (final r in results) {
       if (r.pending && r.tries >= 3) {
@@ -10843,7 +11995,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         r.cntNotes.add('العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد');
       }
     }
-    final todo = results.where((r) => r.pending).toList();
+    final todo = results.where((r) => r.pending && (only == null || only.contains(r))).toList();
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
       final r = todo[i];
@@ -11400,7 +12552,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final got = results.where((r) => !r.excluded).map((r) => r.orderNum).whereType<int>().toSet();
     final out = <String>[];
     for (var n = 1; n <= 19; n++) {
-      if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
+      if (!got.contains(n) && !offTids.contains(numToTid[n])) out.add('$n ${terminals[numToTid[n]]!.unitName}');
     }
     return out;
   }
@@ -11502,7 +12654,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _switchRow('فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
+            _switchRow('فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             _countMethodsPanel(busy: busy, onChanged: () => setState(() {})),
             const Divider(height: 4),
             _sourceChips(context,
@@ -11746,6 +12898,233 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 ),
               );
             }),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════ شاشة إدارة الماكينات ═══════════════
+Future<void> openMachinesManager(BuildContext context) async {
+  await Navigator.push(context, MaterialPageRoute(builder: (_) => const MachinesManagePage()));
+}
+
+class MachinesManagePage extends StatefulWidget {
+  const MachinesManagePage({super.key});
+
+  @override
+  State<MachinesManagePage> createState() => _MachinesManagePageState();
+}
+
+class _MachinesManagePageState extends State<MachinesManagePage> {
+  final Map<String, int> _sel = {}; // الوحدة المختارة لكل ماكينة في الانتظار
+
+  @override
+  void initState() {
+    super.initState();
+    registryRev.addListener(_onRev);
+  }
+
+  @override
+  void dispose() {
+    registryRev.removeListener(_onRev);
+    super.dispose();
+  }
+
+  void _onRev() {
+    if (mounted) setState(() {});
+  }
+
+  List<int> get _rows => rowNames.keys.toList()..sort();
+
+  void _snack(String s) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(s)));
+  }
+
+  Future<String?> _askMid(String title, String initial) async {
+    final c = TextEditingController(text: initial);
+    final r = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: w.Text(title),
+        content: TextField(
+          controller: c,
+          keyboardType: TextInputType.number,
+          textDirection: TextDirection.ltr,
+          decoration: const InputDecoration(labelText: 'Merchant ID'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: w.Text('إلغاء')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, c.text.replaceAll(RegExp(r'\D'), '')),
+              child: w.Text('تمام')),
+        ],
+      ),
+    );
+    c.dispose();
+    if (r == null) return null;
+    if (r.length < 8 || r.length > 16) {
+      _snack('الـ Merchant ID لازم يبقى من 8 لـ 16 رقم');
+      return null;
+    }
+    return r;
+  }
+
+  Future<void> _newMerchantFor(String tid) async {
+    final mid = await _askMid('Merchant ID جديد', '');
+    if (mid == null || !mounted) return;
+    final known = rowForMerchant(mid);
+    if (known != null) {
+      setMachineMerchant(tid, mid);
+      _snack('الرقم ده معروف أصلاً لوحدة ${rowNames[known] ?? ''}');
+      return;
+    }
+    var row = terminals[tid]?.excelRow ?? _rows.first;
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          title: w.Text('الوحدة بتاعة الـ Merchant ID ده'),
+          content: DropdownButton<int>(
+            isExpanded: true,
+            value: row,
+            items: [for (final r in _rows) DropdownMenuItem(value: r, child: w.Text(rowNames[r] ?? '$r'))],
+            onChanged: (v) => setS(() => row = v ?? row),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: w.Text('إلغاء')),
+            TextButton(onPressed: () => Navigator.pop(ctx, row), child: w.Text('حفظ')),
+          ],
+        ),
+      ),
+    );
+    if (picked == null) return;
+    addMerchantAndAssign(tid, mid, picked);
+  }
+
+  Widget _pendingCard(PendingMachine p) {
+    final sel = _sel[p.tid] ?? p.guessRow;
+    return Card(
+      color: Colors.amber.withOpacity(0.12),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            w.Text('ماكينة جديدة: ${p.tid}', style: const TextStyle(fontWeight: FontWeight.bold)),
+            if (p.name.isNotEmpty) w.Text('الاسم المقروء: ${p.name}'),
+            w.Text('Merchant ID المقروء: ${p.mid}', textDirection: TextDirection.ltr),
+            if (p.note.isNotEmpty) w.Text('⚠️ ${p.note}', style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 6),
+            DropdownButton<int>(
+              isExpanded: true,
+              value: sel != null && rowNames.containsKey(sel) ? sel : null,
+              hint: w.Text('اختار الوحدة'),
+              items: [for (final r in _rows) DropdownMenuItem(value: r, child: w.Text(rowNames[r] ?? '$r'))],
+              onChanged: (v) => setState(() => _sel[p.tid] = v ?? 0),
+            ),
+            Wrap(
+              spacing: 8,
+              children: [
+                ElevatedButton(
+                  onPressed: sel == null || !rowNames.containsKey(sel)
+                      ? null
+                      : () {
+                          approvePending(p, sel, p.mid);
+                          _snack('اتضافت ماكينة ${p.tid}. أعد فحص الإيصالات علشان تتحسب.');
+                        },
+                  child: w.Text('موافقة على اللي اتقرا'),
+                ),
+                OutlinedButton(
+                  onPressed: sel == null || !rowNames.containsKey(sel)
+                      ? null
+                      : () async {
+                          final mid = await _askMid('تعديل الـ Merchant ID', p.mid);
+                          if (mid == null) return;
+                          approvePending(p, sel, mid);
+                        },
+                  child: w.Text('تعديل وإضافة'),
+                ),
+                TextButton(onPressed: () => rejectPending(p), child: w.Text('تجاهل')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _machineCard(int n) {
+    final tid = numToTid[n];
+    final info = tid == null ? null : terminals[tid];
+    if (tid == null || info == null) return const SizedBox.shrink();
+    final cur = machineMerchant[tid] ?? '';
+    final mids = <String>{for (final m in merchantList) m.mid}.toList();
+    if (cur.isNotEmpty && !mids.contains(cur)) mids.add(cur);
+    final off = offTids.contains(tid);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: w.Text('ماكينة $n - ${info.unitName}${_extraTids.contains(tid) ? ' (جديدة)' : ''}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                w.Text(off ? 'إجازة' : 'شغالة', style: const TextStyle(fontSize: 12)),
+                Switch(value: !off, onChanged: (v) => setMachineOff(tid, !v)),
+              ],
+            ),
+            w.Text('Terminal: $tid', textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+            DropdownButton<String>(
+              isExpanded: true,
+              value: cur,
+              items: [
+                DropdownMenuItem(value: '', child: w.Text('Merchant ID: غير محدد')),
+                for (final m in mids)
+                  DropdownMenuItem(
+                      value: m,
+                      child: w.Text('$m  ·  ${rowForMerchant(m) != null ? rowNames[rowForMerchant(m)] ?? '' : ''}',
+                          textDirection: TextDirection.ltr)),
+                DropdownMenuItem(value: '__new__', child: w.Text('➕ Merchant ID جديد...')),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                if (v == '__new__') {
+                  _newMerchantFor(tid);
+                } else {
+                  setMachineMerchant(tid, v);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final n = machineCount;
+    return Scaffold(
+      appBar: AppBar(title: w.Text('إدارة الماكينات')),
+      body: ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          if (pendingMachines.isNotEmpty) ...[
+            w.Text('ماكينات في انتظار الموافقة (${pendingMachines.length})',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 4),
+            for (final p in List<PendingMachine>.from(pendingMachines)) _pendingCard(p),
+            const SizedBox(height: 12),
+          ],
+          w.Text('الماكينات ($n)', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 4),
+          for (var i = 1; i <= n; i++) _machineCard(i),
+          const SizedBox(height: 40),
         ],
       ),
     );
