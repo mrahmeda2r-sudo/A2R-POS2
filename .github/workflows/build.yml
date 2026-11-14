@@ -40,8 +40,8 @@ jobs:
           flutter create --org com.pos --project-name pos_app --platforms android app
           cp main.dart app/lib/main.dart
           cd app
-          flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences file_picker excel
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
@@ -64,7 +64,7 @@ jobs:
               <external-path name="all_ext" path="." />
           </paths>
           EOX
-          sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.pos_fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/pos_file_paths"/></provider>\n    <service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync"/>\n    </application>|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.pos_fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/pos_file_paths"/></provider>\n    <service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync\|specialUse"><property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="receipt_ocr_monitoring"/></service>\n    </application>|' android/app/src/main/AndroidManifest.xml
           grep -n "pos_fileprovider" android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="A2R POS"|' android/app/src/main/AndroidManifest.xml
           grep -n "android:label" android/app/src/main/AndroidManifest.xml
@@ -89,12 +89,34 @@ jobs:
 
           class MainActivity : FlutterActivity() {
               private var pickResult: MethodChannel.Result? = null
+              private var nativeChan: MethodChannel? = null
+              private var pendingOpen: String? = null
+
+              override fun onCreate(savedInstanceState: android.os.Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  pendingOpen = intent?.getStringExtra("open")
+                  intent?.removeExtra("open")
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  val p = intent.getStringExtra("open")
+                  if (p != null) {
+                      intent.removeExtra("open")
+                      pendingOpen = p
+                      try {
+                          nativeChan?.invokeMethod("onOpen", p)
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
-                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "pos/native")
-                      .setMethodCallHandler { call, result ->
+                  nativeChan = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "pos/native")
+                  nativeChan!!.setMethodCallHandler { call, result ->
                           when (call.method) {
                               "openFolder" -> {
                                   val path = call.argument<String>("path") ?: ""
@@ -118,12 +140,23 @@ jobs:
                                   }
                                   result.success(true)
                               }
+                              "getInitialOpen" -> {
+                                  val p0 = pendingOpen
+                                  pendingOpen = null
+                                  result.success(p0)
+                              }
                               "notify" -> {
                                   try {
                                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                                      nm.notify(8, NotifHelper.build(this, "pos_done", "اكتمال المعالجة",
+                                      var nid = call.argument<Number>("id")?.toInt() ?: (System.currentTimeMillis() % 2000000000L).toInt()
+                                      if (nid == 7) nid = 8
+                                      val alert = call.argument<Boolean>("alert") ?: false
+                                      val openP = call.argument<String>("open")
+                                      val cid = if (alert) "pos_alert2" else "pos_ok2"
+                                      val cname = if (alert) "تنبيه مشاكل الفحص" else "نتيجة الفحص (هادي)"
+                                      nm.notify(nid, NotifHelper.build(this, cid, cname,
                                           call.argument<String>("title") ?: "A2R POS",
-                                          call.argument<String>("text") ?: "", false))
+                                          call.argument<String>("text") ?: "", false, openP, nid))
                                       result.success(true)
                                   } catch (e: Exception) {
                                       result.success(false)
@@ -557,21 +590,42 @@ jobs:
           import android.os.IBinder
 
           object NotifHelper {
-              fun build(ctx: Context, channelId: String, channelName: String, title: String, text: String, ongoing: Boolean): Notification {
+              fun build(ctx: Context, channelId: String, channelName: String, title: String, text: String, ongoing: Boolean, openPayload: String? = null, reqCode: Int = 0): Notification {
                   val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                   if (Build.VERSION.SDK_INT >= 26) {
                       val imp = if (ongoing) NotificationManager.IMPORTANCE_LOW else NotificationManager.IMPORTANCE_HIGH
-                      nm.createNotificationChannel(NotificationChannel(channelId, channelName, imp))
+                      val ch = NotificationChannel(channelId, channelName, imp)
+                      if (channelId == "pos_alert2") {
+                          ch.enableVibration(true)
+                          ch.vibrationPattern = longArrayOf(0, 500, 200, 500, 200, 800)
+                          ch.setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,
+                              android.media.AudioAttributes.Builder()
+                                  .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                                  .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                      } else if (channelId == "pos_ok2") {
+                          ch.setSound(null, null)
+                          ch.enableVibration(false)
+                      }
+                      nm.createNotificationChannel(ch)
                   }
-                  val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: Intent()
-                  val pi = PendingIntent.getActivity(ctx, 0, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                  val launch: Intent = if (openPayload != null) {
+                      val li = Intent(ctx, MainActivity::class.java)
+                      li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                      li.putExtra("open", openPayload)
+                      li
+                  } else {
+                      ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: Intent()
+                  }
+                  val pi = PendingIntent.getActivity(ctx, reqCode, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
                   val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, channelId) else Notification.Builder(ctx)
                   b.setSmallIcon(ctx.applicationInfo.icon)
                   b.setContentTitle(title)
                   b.setContentText(text)
                   b.setContentIntent(pi)
+                  if (!ongoing) b.setStyle(Notification.BigTextStyle().bigText(text))
                   b.setOngoing(ongoing)
                   b.setAutoCancel(!ongoing)
+                  if (Build.VERSION.SDK_INT < 26 && channelId == "pos_alert2") b.setDefaults(Notification.DEFAULT_SOUND or Notification.DEFAULT_VIBRATE)
                   return b.build()
               }
           }
@@ -591,23 +645,43 @@ jobs:
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  if (wl == null) {
-                      try {
+                  try {
+                      if (wl == null) {
                           val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
                           wl = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "pos:keepalive")
                           wl?.setReferenceCounted(false)
-                          wl?.acquire()
-                      } catch (e: Exception) {
                       }
+                      if (wl?.isHeld != true) wl?.acquire()
+                  } catch (e: Exception) {
                   }
                   val title = intent?.getStringExtra("title") ?: "A2R POS"
                   val text = intent?.getStringExtra("text") ?: ""
                   val n = NotifHelper.build(this, "pos_progress", "جاري المعالجة", title, text, true)
-                  if (Build.VERSION.SDK_INT >= 29) {
-                      startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-                  } else {
-                      startForeground(7, n)
+                  var started = false
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      // أندرويد 14+: specialUse (مفيهوش حد زمني زي dataSync)
+                      try {
+                          startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                          started = true
+                      } catch (e: Exception) {
+                      }
                   }
+                  if (!started && Build.VERSION.SDK_INT >= 29) {
+                      // 29 لـ 33: dataSync. وعلى 34+ لو specialUse فشل نرجع له بدل ما التطبيق يقفل
+                      try {
+                          startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                          started = true
+                      } catch (e: Exception) {
+                      }
+                  }
+                  if (!started && Build.VERSION.SDK_INT < 29) {
+                      try {
+                          startForeground(7, n)
+                          started = true
+                      } catch (e: Exception) {
+                      }
+                  }
+                  if (!started) stopSelf()
                   return START_NOT_STICKY
               }
           }
