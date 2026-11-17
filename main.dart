@@ -4227,17 +4227,20 @@ Map<String, dynamic> _prepCrop(String src, String dst, List<List<double>>? saved
   List<List<double>>? qs = saved;
   var auto = false;
   if (qs == null) {
-    var quads = _detectReceipts(im, allowFull: false);
-    if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
-    if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-    if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
-    if (quads.isNotEmpty) {
-      qs = <List<double>>[
-        for (final a in quads)
-          [for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? im.width : im.height), 0.0, 1.0)]
-      ];
-      auto = true;
-    }
+    try {
+      var quads = _detectReceipts(im, allowFull: false);
+      if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
+      if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
+      if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
+      if (quads.isNotEmpty) {
+        final iw0 = im.width, ih0 = im.height;
+        qs = <List<double>>[
+          for (final a in quads)
+            [for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? iw0 : ih0), 0.0, 1.0)]
+        ];
+        auto = true;
+      }
+    } catch (_) {}
   }
   qs ??= <List<double>>[
     [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
@@ -4260,6 +4263,12 @@ List<Uint8List> _warpPreview(String path, List<List<double>> qs) {
   } catch (_) {}
   return res;
 }
+
+Future<Map<String, dynamic>> prepCropAsync(String src, String dst, List<List<double>>? saved) =>
+    Isolate.run(() => _prepCrop(src, dst, saved));
+
+Future<List<Uint8List>> warpPreviewAsync(String path, List<List<double>> qs) =>
+    Isolate.run(() => _warpPreview(path, qs));
 
 Future<List<String>> scanReceiptAsync(String src, {List<List<double>>? manual}) async {
   try {
@@ -8678,16 +8687,18 @@ class SysLine {
   const SysLine(this.text, this.ok);
 }
 
-class CropPage extends StatefulWidget {
+class CropEditor extends StatefulWidget {
   final String path;
   final List<MergeCand> cands; // باقي الباتشات اللي ينفع تتضم جنب ده
-  const CropPage({super.key, required this.path, this.cands = const <MergeCand>[]});
+  final void Function(CropResult?) onDone; // null = إلغاء
+  const CropEditor({super.key, required this.path, required this.onDone, this.cands = const <MergeCand>[]});
 
   @override
-  State<CropPage> createState() => _CropPageState();
+  State<CropEditor> createState() => _CropEditorState();
 }
 
-class _CropPageState extends State<CropPage> {
+class _CropEditorState extends State<CropEditor> {
+  String err = '';
   String? prev;
   double iw = 1, ih = 1;
   List<List<double>> qs = <List<double>>[
@@ -8797,7 +8808,7 @@ class _CropPageState extends State<CropPage> {
       final st = File(src).statSync();
       final dst = '$baseDir/.scans/cp_${safe}_${st.size}.jpg';
       final saved = useSaved ? cropOf(src) : null;
-      final r = await Isolate.run(() => _prepCrop(src, dst, saved));
+      final r = await prepCropAsync(src, dst, saved);
       if (!mounted) return;
       await FileImage(File(dst)).evict();
       if (useSaved) {
@@ -8824,11 +8835,12 @@ class _CropPageState extends State<CropPage> {
         loading = false;
       });
       _refreshPreview();
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         loading = false;
         failed = true;
+        err = e.toString();
       });
     }
   }
@@ -8844,7 +8856,7 @@ class _CropPageState extends State<CropPage> {
     final qq = _sortQuads(qs);
     final my = ++_seq;
     setState(() => busy = true);
-    final b = await Isolate.run(() => _warpPreview(p, qq));
+    final b = await warpPreviewAsync(p, qq);
     if (!mounted || my != _seq) return;
     setState(() {
       outs = b;
@@ -8946,21 +8958,10 @@ class _CropPageState extends State<CropPage> {
       );
     });
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('قص الباتش', style: TextStyle(fontSize: 16)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, const CropResult(null, <String>[], clear: true)),
-            child: const Text('مسح القص اليدوي'),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: loading
+    return loading
             ? const Center(child: CircularProgressIndicator())
             : failed
-                ? const Center(child: Text('مقدرتش أفتح الصورة.'))
+                ? Center(child: Padding(padding: const EdgeInsets.all(16), child: Text('مقدرتش أفتح الصورة.\n$err', textAlign: TextAlign.center)))
                 : Column(children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
@@ -9058,23 +9059,20 @@ class _CropPageState extends State<CropPage> {
                         const SizedBox(height: 6),
                         Row(children: [
                           OutlinedButton(
-                            onPressed: () => Navigator.pop(context),
+                            onPressed: () => widget.onDone(null),
                             child: const Text('إلغاء'),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: FilledButton(
-                              onPressed: () => Navigator.pop(
-                                  context, CropResult(_sortQuads(qs), [for (final p in merged) baseName(p)])),
+                              onPressed: () => widget.onDone(CropResult(_sortQuads(qs), [for (final p in merged) baseName(p)])),
                               child: const Text('تطبيق على الـ PDF'),
                             ),
                           ),
                         ]),
                       ]),
                     ),
-                  ]),
-      ),
-    );
+                  ]);
   }
 }
 
@@ -9295,19 +9293,21 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
-  // قص يدوي: بتحدد أركان الباتش (أو أكتر من باتش في الصورة) بإيدك وتشوف المعاينة لايف، والـ PDF بيستخدم نفس القص
-  Future<void> cropBatch() async {
-    final p = item.path;
-    int sig() {
-      try {
-        final st = File(p).statSync();
-        return st.size ^ st.modified.millisecondsSinceEpoch;
-      } catch (_) {
-        return 0;
-      }
-    }
+  // قص يدوي: بيفتح محرّر القص جوه نفس الشاشة (من غير ما يفتح صفحة تانية)
+  bool cropMode = false;
+  List<MergeCand> cropCands = <MergeCand>[];
+  int _cropSigBefore = 0;
 
-    final before = sig();
+  int _sigOf(String p) {
+    try {
+      final st = File(p).statSync();
+      return st.size ^ st.modified.millisecondsSinceEpoch;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  void cropBatch() {
     final me = item;
     final cands = <MapEntry<int, MergeCand>>[];
     for (final x in (widget.allItems ?? widget.items)) {
@@ -9318,18 +9318,29 @@ class _ReviewPageState extends State<ReviewPage> {
           MergeCand(x.path, lab, x.amount > 0 ? '${x.amount.toStringAsFixed(2)} ج.م' : 'مبلغ غير مقروء')));
     }
     cands.sort((a, b) => a.key.compareTo(b.key));
-    final r = await Navigator.push<CropResult>(
-      context,
-      MaterialPageRoute(builder: (_) => CropPage(path: p, cands: [for (final e in cands) e.value])),
-    );
-    if (!mounted) return;
-    if (sig() != before) {
-      // الصورة اتدوّرت من جوه شاشة القص
+    _cropSigBefore = _sigOf(me.path);
+    setState(() {
+      cropCands = [for (final e in cands) e.value];
+      cropMode = true;
+    });
+  }
+
+  Future<void> _finishCrop(CropResult? r) async {
+    final p = item.path;
+    // الـ PageView اتشال وقت القص: نعمل controller جديد على الباتش الحالي
+    _pc.dispose();
+    _pc = PageController(initialPage: idx);
+    final rotated = _sigOf(p) != _cropSigBefore;
+    if (rotated) {
       await FileImage(File(p)).evict();
       imageCache.clear();
       changed = true;
-      setState(() => rev++);
     }
+    if (!mounted) return;
+    setState(() {
+      cropMode = false;
+      if (rotated) rev++;
+    });
     if (r == null) return;
     if (r.clear) {
       saveCrop(p, null);
@@ -9415,6 +9426,34 @@ class _ReviewPageState extends State<ReviewPage> {
   Widget build(BuildContext context) {
     AppSettings.of(context);
     final it = item;
+    if (cropMode) {
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _finishCrop(null);
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('قص الباتش', style: TextStyle(fontSize: 16)),
+            leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => _finishCrop(null)),
+            actions: [
+              TextButton(
+                onPressed: () => _finishCrop(const CropResult(null, <String>[], clear: true)),
+                child: const Text('مسح القص اليدوي'),
+              ),
+            ],
+          ),
+          body: SafeArea(
+            child: CropEditor(
+              key: ValueKey('crop${it.path}'),
+              path: it.path,
+              cands: cropCands,
+              onDone: _finishCrop,
+            ),
+          ),
+        ),
+      );
+    }
     final image = Container(
       color: Colors.black12,
       child: Stack(
