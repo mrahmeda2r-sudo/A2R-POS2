@@ -1544,7 +1544,7 @@ Future<void> wipeEverything(BuildContext context) async {
       }
     }
   } catch (_) {}
-  for (final p in [fixPath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
+  for (final p in [fixPath, cropStorePath, mergeStorePath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
     final f = File(p);
     if (f.existsSync()) delFile(f);
   }
@@ -1781,6 +1781,9 @@ const Map<String, String> _kEnExact = {
   'إكسيل': 'Excel',
   'تدوير': 'Rotate',
   'قص': 'Crop',
+  'قص ✓': 'Crop ✓',
+  'إضافة باتش': 'Add batch',
+  'ضم باتش من صورة تانية': 'Merge batch from another image',
   'قص الباتش': 'Crop batch',
   'تطبيق على الـ PDF': 'Apply to PDF',
   'تلقائي': 'Auto',
@@ -4068,7 +4071,8 @@ List<String> _scanToPages(String src, String base) {
   return out;
 }
 
-// ───────── القص اليدوي: 4 أركان (نسب 0..1 من الصورة بعد تصحيح الاتجاه) بترتيب tl, tr, bl, br ─────────
+// ───────── القص اليدوي: لكل باتش 4 أركان (نسب 0..1 من الصورة بعد تصحيح الاتجاه) بترتيب tl, tr, bl, br ─────────
+// الصورة الواحدة ممكن يبقى فيها أكتر من باتش: بنخزّن قايمة أركان (واحدة لكل باتش)
 final String cropStorePath = '$baseDir/.app_crops.json';
 
 Map<String, dynamic> _loadCrops() {
@@ -4079,21 +4083,35 @@ Map<String, dynamic> _loadCrops() {
   }
 }
 
-List<double>? cropOf(String path) {
+List<List<double>>? cropOf(String path) {
   final v = _loadCrops()[baseName(path)];
-  if (v is List && v.length == 8) {
-    return [for (final x in v) (x as num).toDouble()];
+  if (v is! List || v.isEmpty) return null;
+  try {
+    if (v.first is num) {
+      // الشكل القديم: باتش واحد
+      return v.length == 8
+          ? <List<double>>[
+              [for (final x in v) (x as num).toDouble()]
+            ]
+          : null;
+    }
+    final out = <List<double>>[];
+    for (final e in v) {
+      if (e is List && e.length == 8) out.add([for (final x in e) (x as num).toDouble()]);
+    }
+    return out.isEmpty ? null : out;
+  } catch (_) {
+    return null;
   }
-  return null;
 }
 
-void saveCrop(String path, List<double>? q) {
+void saveCrop(String path, List<List<double>>? qs) {
   try {
     final m = _loadCrops();
-    if (q == null) {
+    if (qs == null || qs.isEmpty) {
       m.remove(baseName(path));
     } else {
-      m[baseName(path)] = q;
+      m[baseName(path)] = qs;
     }
     File(cropStorePath)
       ..createSync(recursive: true)
@@ -4101,27 +4119,102 @@ void saveCrop(String path, List<double>? q) {
   } catch (_) {}
 }
 
-// بتشتغل في Isolate: قص يدوي بالأركان اللي المستخدم حددها
-List<String> _scanManual(String src, String base, List<double> q) {
-  final p = '${base}_0.jpg';
+// ───────── ضم باتش من صورة تانية: الصورة "المضيفة" بتاخد صور تانية جنبها في نفس صفحة الـ PDF ─────────
+// (الحسابات مبتتغيرش: كل صورة بمبلغها، الضم بيأثر على شكل الـ PDF بس)
+final String mergeStorePath = '$baseDir/.app_merge.json';
+
+Map<String, dynamic> _loadMerges() {
   try {
-    if (File(p).existsSync()) return <String>[p];
+    return Map<String, dynamic>.from(jsonDecode(File(mergeStorePath).readAsStringSync()) as Map);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
+}
+
+List<String> mergeOf(String path) {
+  final v = _loadMerges()[baseName(path)];
+  if (v is List) return [for (final e in v) e.toString()];
+  return <String>[];
+}
+
+// لو الصورة دي مضمومة لصورة تانية: بيرجّع اسم المضيفة
+String? mergedInto(String path) {
+  final n = baseName(path);
+  for (final e in _loadMerges().entries) {
+    final v = e.value;
+    if (v is List && v.map((x) => x.toString()).contains(n)) return e.key;
+  }
+  return null;
+}
+
+void saveMerge(String path, List<String>? names) {
+  try {
+    final m = _loadMerges();
+    if (names == null || names.isEmpty) {
+      m.remove(baseName(path));
+    } else {
+      m[baseName(path)] = names;
+    }
+    File(mergeStorePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+class MergeCand {
+  final String path, label, sub;
+  const MergeCand(this.path, this.label, this.sub);
+}
+
+class CropResult {
+  final List<List<double>>? quads; // null + clear = مسح القص اليدوي
+  final List<String> merged; // أسماء ملفات الصور المضمومة
+  final bool clear;
+  const CropResult(this.quads, this.merged, {this.clear = false});
+}
+
+// شمال لليمين (زي ترتيب الباتشات في الـ PDF)
+List<List<double>> _sortQuads(List<List<double>> qs) {
+  final l = qs.map((q) => List<double>.from(q)).toList();
+  double cx(List<double> q) => (q[0] + q[2] + q[4] + q[6]) / 4;
+  double cy(List<double> q) => (q[1] + q[3] + q[5] + q[7]) / 4;
+  l.sort((a, b) {
+    final c = cx(a).compareTo(cx(b));
+    return c != 0 ? c : cy(a).compareTo(cy(b));
+  });
+  return l;
+}
+
+// بتشتغل في Isolate: قص يدوي بالأركان اللي المستخدم حددها (صفحة لكل باتش)
+List<String> _scanManual(String src, String base, List<List<double>> qs) {
+  try {
+    final cached = <String>[];
+    while (File('${base}_${cached.length}.jpg').existsSync()) {
+      cached.add('${base}_${cached.length}.jpg');
+    }
+    if (cached.length == qs.length) return cached;
     var im = img.decodeImage(File(src).readAsBytesSync());
     if (im == null) return <String>[];
     im = img.bakeOrientation(im);
     final w = im.width.toDouble(), h = im.height.toDouble();
-    final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
-    final o = _warpAndEnhance(im, px);
-    if (o == null) return <String>[];
-    File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
-    return <String>[p];
+    final out = <String>[];
+    for (var k = 0; k < qs.length; k++) {
+      final q = qs[k];
+      final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+      final o = _warpAndEnhance(im, px);
+      if (o == null) continue;
+      final p = '${base}_${out.length}.jpg';
+      File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
+      out.add(p);
+    }
+    return out;
   } catch (_) {
     return <String>[];
   }
 }
 
 // بتشتغل في Isolate: نسخة معاينة مصغّرة للصورة + الأركان (المحفوظة أو التلقائية)
-Map<String, dynamic> _prepCrop(String src, String dst, List<double>? saved) {
+Map<String, dynamic> _prepCrop(String src, String dst, List<List<double>>? saved) {
   var im = img.decodeImage(File(src).readAsBytesSync());
   if (im == null) throw Exception('decode failed');
   im = img.bakeOrientation(im);
@@ -4131,48 +4224,51 @@ Map<String, dynamic> _prepCrop(String src, String dst, List<double>? saved) {
         width: (im.width * k).round(), height: (im.height * k).round(), interpolation: img.Interpolation.linear);
   }
   File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 88));
-  List<double>? q = saved;
+  List<List<double>>? qs = saved;
   var auto = false;
-  if (q == null) {
+  if (qs == null) {
     var quads = _detectReceipts(im, allowFull: false);
     if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
     if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
     if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
     if (quads.isNotEmpty) {
-      final a = quads.first;
-      q = <double>[
-        for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? im.width : im.height), 0.0, 1.0)
+      qs = <List<double>>[
+        for (final a in quads)
+          [for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? im.width : im.height), 0.0, 1.0)]
       ];
       auto = true;
     }
   }
-  q ??= <double>[0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9];
-  return <String, dynamic>{'w': im.width, 'h': im.height, 'q': q, 'auto': auto};
+  qs ??= <List<double>>[
+    [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
+  ];
+  return <String, dynamic>{'w': im.width, 'h': im.height, 'qs': qs, 'auto': auto};
 }
 
 // بتشتغل في Isolate: المعاينة الحية للقص (نفس دالة الفرد والتحسين اللي بتتستخدم في الـ PDF)
-Uint8List? _warpPreview(String path, List<double> q) {
+List<Uint8List> _warpPreview(String path, List<List<double>> qs) {
+  final res = <Uint8List>[];
   try {
     final im = img.decodeJpg(File(path).readAsBytesSync());
-    if (im == null) return null;
+    if (im == null) return res;
     final w = im.width.toDouble(), h = im.height.toDouble();
-    final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
-    final o = _warpAndEnhance(im, px);
-    if (o == null) return null;
-    return Uint8List.fromList(img.encodeJpg(o, quality: 85));
-  } catch (_) {
-    return null;
-  }
+    for (final q in qs) {
+      final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+      final o = _warpAndEnhance(im, px);
+      if (o != null) res.add(Uint8List.fromList(img.encodeJpg(o, quality: 85)));
+    }
+  } catch (_) {}
+  return res;
 }
 
-Future<List<String>> scanReceiptAsync(String src, {List<double>? manual}) async {
+Future<List<String>> scanReceiptAsync(String src, {List<List<double>>? manual}) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
     final tag = manual == null
         ? 'v7'
-        : 'm${manual.map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
+        : 'm${manual.expand((q) => q).map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
     final base = '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     if (manual != null) return await Isolate.run(() => _scanManual(src, base, manual));
     return await Isolate.run(() => _scanToPages(src, base));
@@ -6724,8 +6820,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
       final pdf = pw.Document();
       var pages = 0;
+      // الصور المضمومة: الصورة المضيفة بتاخدها جنبها في نفس الصفحة، والمضمومة مبتطلعش صفحة لوحدها
+      final mergeMap = _loadMerges();
+      final byBase = <String, ReceiptItem>{for (final x in items) baseName(x.path): x};
+      final mergedOf = <String, List<ReceiptItem>>{};
+      final hidden = <String>{};
+      for (final r in items) {
+        final names = mergeMap[baseName(r.path)];
+        if (names is! List) continue;
+        for (final nm in names) {
+          final m = byBase[nm.toString()];
+          if (m == null || identical(m, r)) continue;
+          (mergedOf[baseName(r.path)] ??= <ReceiptItem>[]).add(m);
+          hidden.add(nm.toString());
+        }
+      }
+      hidden.removeAll(mergedOf.keys); // مضيف مبيتخبّاش (يمنع الدوران)
+      Future<List<String>> pagesOf(String path) async {
+        var l = <String>[];
+        try {
+          final mq = cropOf(path);
+          if (mq != null) l = await scanReceiptAsync(path, manual: mq);
+          if (l.isEmpty) l = await scanReceiptAsync(path);
+        } catch (_) {}
+        return l.isEmpty ? <String>[path] : l;
+      }
+
       for (final r in items) {
         pageNo++;
+        if (hidden.contains(baseName(r.path))) continue;
         if (!File(r.path).existsSync()) continue;
         setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
         // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
@@ -6736,6 +6859,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (srcs.isEmpty) srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
+        for (final mi in mergedOf[baseName(r.path)] ?? const <ReceiptItem>[]) {
+          if (File(mi.path).existsSync()) srcs = [...srcs, ...await pagesOf(mi.path)];
+        }
         // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
         if (srcs.length > 1) {
           try {
@@ -8554,7 +8680,8 @@ class SysLine {
 
 class CropPage extends StatefulWidget {
   final String path;
-  const CropPage({super.key, required this.path});
+  final List<MergeCand> cands; // باقي الباتشات اللي ينفع تتضم جنب ده
+  const CropPage({super.key, required this.path, this.cands = const <MergeCand>[]});
 
   @override
   State<CropPage> createState() => _CropPageState();
@@ -8563,17 +8690,93 @@ class CropPage extends StatefulWidget {
 class _CropPageState extends State<CropPage> {
   String? prev;
   double iw = 1, ih = 1;
-  List<double> q = <double>[0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9];
+  List<List<double>> qs = <List<double>>[
+    [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
+  ];
+  int sel = 0; // الباتش المختار حاليًا
   bool loading = true, failed = false, autoFound = false, busy = false;
   int drag = -1;
   int _seq = 0;
-  Uint8List? out;
+  List<Uint8List> outs = <Uint8List>[];
+  List<String> merged = <String>[]; // مسارات الصور المضمومة
+  final Map<String, List<Uint8List>> mb = <String, List<Uint8List>>{};
   Timer? _t;
 
   @override
   void initState() {
     super.initState();
     _init(true);
+  }
+
+  String _labelOf(String p) {
+    for (final c in widget.cands) {
+      if (c.path == p) return '${c.label} • ${c.sub}';
+    }
+    return baseName(p);
+  }
+
+  // صفحات صورة مضمومة (بقصها اليدوي لو فيه، أو التلقائي)
+  Future<void> _loadMb(String p) async {
+    if (mb.containsKey(p)) return;
+    try {
+      var l = <String>[];
+      final mq = cropOf(p);
+      if (mq != null) l = await scanReceiptAsync(p, manual: mq);
+      if (l.isEmpty) l = await scanReceiptAsync(p);
+      final bytes = <Uint8List>[for (final f in l) File(f).readAsBytesSync()];
+      mb[p] = bytes.isEmpty ? <Uint8List>[File(p).readAsBytesSync()] : bytes;
+    } catch (_) {
+      mb[p] = <Uint8List>[];
+    }
+  }
+
+  Future<void> _pickMerge() async {
+    final avail = widget.cands.where((c) => !merged.contains(c.path)).toList();
+    if (avail.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مفيش باتشات تانية تتضم.')),
+      );
+      return;
+    }
+    final pick = await showModalBottomSheet<MergeCand>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('اختار الباتش اللي هيتضم جنب ده في الـ PDF',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            Flexible(
+              child: ListView(shrinkWrap: true, children: [
+                for (final c in avail)
+                  ListTile(
+                    leading: SizedBox(
+                      width: 44,
+                      height: 56,
+                      child: Image.file(File(c.path), cacheWidth: 120, fit: BoxFit.cover),
+                    ),
+                    title: Text(c.label),
+                    subtitle: Text(c.sub),
+                    onTap: () => Navigator.pop(ctx, c),
+                  ),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    );
+    if (pick == null || !mounted) return;
+    setState(() => busy = true);
+    await _loadMb(pick.path);
+    if (!mounted) return;
+    setState(() {
+      merged.add(pick.path);
+      busy = false;
+    });
   }
 
   @override
@@ -8597,11 +8800,26 @@ class _CropPageState extends State<CropPage> {
       final r = await Isolate.run(() => _prepCrop(src, dst, saved));
       if (!mounted) return;
       await FileImage(File(dst)).evict();
+      if (useSaved) {
+        final names = mergeOf(src);
+        merged = [
+          for (final n in names)
+            for (final c in widget.cands)
+              if (baseName(c.path) == n) c.path
+        ];
+        for (final p in merged) {
+          await _loadMb(p);
+        }
+      }
+      if (!mounted) return;
       setState(() {
         prev = dst;
         iw = (r['w'] as int).toDouble();
         ih = (r['h'] as int).toDouble();
-        q = [for (final v in (r['q'] as List)) (v as num).toDouble()];
+        qs = [
+          for (final q in (r['qs'] as List)) [for (final v in (q as List)) (v as num).toDouble()]
+        ];
+        sel = 0;
         autoFound = r['auto'] == true;
         loading = false;
       });
@@ -8623,15 +8841,50 @@ class _CropPageState extends State<CropPage> {
   Future<void> _refreshPreview() async {
     final p = prev;
     if (p == null) return;
-    final qq = List<double>.from(q);
+    final qq = _sortQuads(qs);
     final my = ++_seq;
     setState(() => busy = true);
     final b = await Isolate.run(() => _warpPreview(p, qq));
     if (!mounted || my != _seq) return;
     setState(() {
-      out = b;
+      outs = b;
       busy = false;
     });
+  }
+
+  void _addBatch() {
+    if (qs.length >= 4) return;
+    // باتش جديد صغير في نص الصورة، وإنت تسحب أركانه
+    setState(() {
+      qs.add(<double>[0.35, 0.3, 0.65, 0.3, 0.35, 0.7, 0.65, 0.7]);
+      sel = qs.length - 1;
+    });
+    _schedule();
+  }
+
+  void _removeBatch() {
+    if (qs.length <= 1) return;
+    setState(() {
+      qs.removeAt(sel);
+      sel = 0;
+    });
+    _schedule();
+  }
+
+  // تدوير الصورة نفسها 90° (القص القديم بيتمسح لأن اتجاه الصورة اتغيّر)
+  Future<void> _rotate() async {
+    try {
+      saveCrop(widget.path, null);
+      await fixImageAsync(widget.path, widget.path, 90);
+      await FileImage(File(widget.path)).evict();
+      imageCache.clear();
+      await _init(false);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مقدرتش أدوّر الصورة.')),
+      );
+    }
   }
 
   @override
@@ -8640,26 +8893,31 @@ class _CropPageState extends State<CropPage> {
       final sc = math.min(box.maxWidth / iw, box.maxHeight / ih);
       final dw = iw * sc, dh = ih * sc;
       final ox = (box.maxWidth - dw) / 2, oy = (box.maxHeight - dh) / 2;
-      Offset pt(int i) => Offset(ox + q[2 * i] * dw, oy + q[2 * i + 1] * dh);
+      Offset pt(int b, int i) => Offset(ox + qs[b][2 * i] * dw, oy + qs[b][2 * i + 1] * dh);
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onPanStart: (d) {
-          var best = -1;
+          var bestB = -1, bestI = -1;
           var bd = 60.0;
-          for (var i = 0; i < 4; i++) {
-            final dd = (pt(i) - d.localPosition).distance;
-            if (dd < bd) {
-              bd = dd;
-              best = i;
+          for (var b = 0; b < qs.length; b++) {
+            for (var i = 0; i < 4; i++) {
+              final dd = (pt(b, i) - d.localPosition).distance;
+              // لو دايرتين متقاربين نفضّل الباتش المختار
+              if (dd < bd || (dd == bd && b == sel)) {
+                bd = dd;
+                bestB = b;
+                bestI = i;
+              }
             }
           }
-          drag = best;
+          drag = bestI;
+          if (bestB >= 0) setState(() => sel = bestB);
         },
         onPanUpdate: (d) {
           if (drag < 0) return;
           setState(() {
-            q[2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
-            q[2 * drag + 1] = _cd((d.localPosition.dy - oy) / dh, 0.0, 1.0);
+            qs[sel][2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
+            qs[sel][2 * drag + 1] = _cd((d.localPosition.dy - oy) / dh, 0.0, 1.0);
           });
         },
         onPanEnd: (_) {
@@ -8676,7 +8934,12 @@ class _CropPageState extends State<CropPage> {
           ),
           Positioned.fill(
             child: CustomPaint(
-              painter: _CropPainter([for (var i = 0; i < 4; i++) pt(i)]),
+              painter: _CropPainter(
+                [
+                  for (var b = 0; b < qs.length; b++) [for (var i = 0; i < 4; i++) pt(b, i)]
+                ],
+                sel,
+              ),
             ),
           ),
         ]),
@@ -8688,7 +8951,7 @@ class _CropPageState extends State<CropPage> {
         title: const Text('قص الباتش', style: TextStyle(fontSize: 16)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, <double>[]),
+            onPressed: () => Navigator.pop(context, const CropResult(null, <String>[], clear: true)),
             child: const Text('مسح القص اليدوي'),
           ),
         ],
@@ -8703,11 +8966,23 @@ class _CropPageState extends State<CropPage> {
                       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
                       child: Text(
                         autoFound
-                            ? 'اسحب الدواير الأربعة على أركان الباتش. المعاينة تحت بتتحدّث لايف.'
-                            : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير الأربعة على أركانه.',
+                            ? 'اسحب الدواير على أركان الباتش. المعاينة تحت بتتحدّث لايف.'
+                            : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير على أركانه.',
                         style: const TextStyle(fontSize: 12.5),
                       ),
                     ),
+                    if (merged.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+                        child: Wrap(spacing: 6, children: [
+                          for (final p in merged)
+                            Chip(
+                              label: Text('➕ ${_labelOf(p)}', style: const TextStyle(fontSize: 12)),
+                              visualDensity: VisualDensity.compact,
+                              onDeleted: () => setState(() => merged.remove(p)),
+                            ),
+                        ]),
+                      ),
                     Expanded(flex: 5, child: editor),
                     const Divider(height: 1),
                     Expanded(
@@ -8717,14 +8992,31 @@ class _CropPageState extends State<CropPage> {
                         width: double.infinity,
                         child: Stack(children: [
                           Positioned.fill(
-                            child: out == null
+                            child: outs.isEmpty
                                 ? const Center(child: CircularProgressIndicator())
                                 : InteractiveViewer(
                                     maxScale: 5,
-                                    child: Image.memory(out!, fit: BoxFit.contain, gaplessPlayback: true),
+                                    child: Row(children: [
+                                      for (final o in outs)
+                                        Expanded(
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(2),
+                                            child: Image.memory(o, fit: BoxFit.contain, gaplessPlayback: true),
+                                          ),
+                                        ),
+                                      for (final p in merged)
+                                        for (final o in mb[p] ?? const <Uint8List>[])
+                                          Expanded(
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(2),
+                                              child: Image.memory(o,
+                                                  fit: BoxFit.contain, gaplessPlayback: true, cacheWidth: 900),
+                                            ),
+                                          ),
+                                    ]),
                                   ),
                           ),
-                          if (busy && out != null)
+                          if (busy && outs.isNotEmpty)
                             const Positioned(
                               top: 6,
                               right: 6,
@@ -8735,24 +9027,49 @@ class _CropPageState extends State<CropPage> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.all(10),
-                      child: Row(children: [
-                        OutlinedButton(
-                          onPressed: () => _init(false),
-                          child: const Text('تلقائي'),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: () => Navigator.pop(context),
-                          child: const Text('إلغاء'),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: FilledButton(
-                            onPressed: () => Navigator.pop(context, List<double>.from(q)),
-                            child: const Text('تطبيق على الـ PDF'),
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Wrap(spacing: 8, runSpacing: 4, alignment: WrapAlignment.center, children: [
+                          OutlinedButton.icon(
+                            onPressed: _rotate,
+                            icon: const Icon(Icons.rotate_right),
+                            label: const Text('تدوير'),
                           ),
-                        ),
+                          OutlinedButton.icon(
+                            onPressed: qs.length < 4 ? _addBatch : null,
+                            icon: const Icon(Icons.add),
+                            label: const Text('إضافة باتش'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: qs.length > 1 ? _removeBatch : null,
+                            icon: const Icon(Icons.delete_outline),
+                            label: Text('حذف باتش ${sel + 1}'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: widget.cands.isEmpty ? null : _pickMerge,
+                            icon: const Icon(Icons.call_merge),
+                            label: const Text('ضم باتش من صورة تانية'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () => _init(false),
+                            child: const Text('تلقائي'),
+                          ),
+                        ]),
+                        const SizedBox(height: 6),
+                        Row(children: [
+                          OutlinedButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('إلغاء'),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () => Navigator.pop(
+                                  context, CropResult(_sortQuads(qs), [for (final p in merged) baseName(p)])),
+                              child: const Text('تطبيق على الـ PDF'),
+                            ),
+                          ),
+                        ]),
                       ]),
                     ),
                   ]),
@@ -8762,34 +9079,49 @@ class _CropPageState extends State<CropPage> {
 }
 
 class _CropPainter extends CustomPainter {
-  final List<Offset> p; // tl, tr, bl, br
-  _CropPainter(this.p);
+  final List<List<Offset>> quads; // لكل باتش: tl, tr, bl, br
+  final int sel;
+  _CropPainter(this.quads, this.sel);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final path = Path()
-      ..moveTo(p[0].dx, p[0].dy)
-      ..lineTo(p[1].dx, p[1].dy)
-      ..lineTo(p[3].dx, p[3].dy)
-      ..lineTo(p[2].dx, p[2].dy)
-      ..close();
-    canvas.drawPath(path, Paint()..color = const Color(0x2200AAFF));
-    canvas.drawPath(
-        path,
-        Paint()
-          ..color = const Color(0xFF00AAFF)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.5);
-    for (final o in p) {
-      canvas.drawCircle(o, 14, Paint()..color = const Color(0x5500AAFF));
-      canvas.drawCircle(
-          o,
-          14,
+    for (var b = 0; b < quads.length; b++) {
+      final p = quads[b];
+      final col = b == sel ? const Color(0xFF00AAFF) : const Color(0xFFFF9800);
+      final path = Path()
+        ..moveTo(p[0].dx, p[0].dy)
+        ..lineTo(p[1].dx, p[1].dy)
+        ..lineTo(p[3].dx, p[3].dy)
+        ..lineTo(p[2].dx, p[2].dy)
+        ..close();
+      canvas.drawPath(path, Paint()..color = col.withOpacity(0.13));
+      canvas.drawPath(
+          path,
           Paint()
-            ..color = Colors.white
+            ..color = col
             ..style = PaintingStyle.stroke
-            ..strokeWidth = 2.5);
-      canvas.drawCircle(o, 3, Paint()..color = const Color(0xFF00AAFF));
+            ..strokeWidth = b == sel ? 2.5 : 1.8);
+      for (final o in p) {
+        canvas.drawCircle(o, 14, Paint()..color = col.withOpacity(0.33));
+        canvas.drawCircle(
+            o,
+            14,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.5);
+        canvas.drawCircle(o, 3, Paint()..color = col);
+      }
+      if (quads.length > 1) {
+        final c = Offset((p[0].dx + p[1].dx + p[2].dx + p[3].dx) / 4, (p[0].dy + p[1].dy + p[2].dy + p[3].dy) / 4);
+        final tp = TextPainter(
+          text: TextSpan(
+              text: '${b + 1}',
+              style: TextStyle(color: col, fontSize: 28, fontWeight: FontWeight.bold)),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+      }
     }
   }
 
@@ -8963,19 +9295,54 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
-  // قص يدوي: بتحدد أركان الباتش بإيدك وتشوف المعاينة لايف، والـ PDF بيستخدم نفس القص
+  // قص يدوي: بتحدد أركان الباتش (أو أكتر من باتش في الصورة) بإيدك وتشوف المعاينة لايف، والـ PDF بيستخدم نفس القص
   Future<void> cropBatch() async {
-    final r = await Navigator.push<List<double>>(
+    final p = item.path;
+    int sig() {
+      try {
+        final st = File(p).statSync();
+        return st.size ^ st.modified.millisecondsSinceEpoch;
+      } catch (_) {
+        return 0;
+      }
+    }
+
+    final before = sig();
+    final me = item;
+    final cands = <MapEntry<int, MergeCand>>[];
+    for (final x in (widget.allItems ?? widget.items)) {
+      if (identical(x, me) || x.path == me.path || x.skip || !File(x.path).existsSync()) continue;
+      final lab = x.orderNum != null ? machineLabel(x.orderNum, x.unitName) : (x.unitName ?? '؟');
+      final rank = (me.orderNum != null && x.orderNum == me.orderNum) ? 0 : 1; // نفس الماكينة الأول
+      cands.add(MapEntry(rank * 1000 + (x.orderNum ?? 999),
+          MergeCand(x.path, lab, x.amount > 0 ? '${x.amount.toStringAsFixed(2)} ج.م' : 'مبلغ غير مقروء')));
+    }
+    cands.sort((a, b) => a.key.compareTo(b.key));
+    final r = await Navigator.push<CropResult>(
       context,
-      MaterialPageRoute(builder: (_) => CropPage(path: item.path)),
+      MaterialPageRoute(builder: (_) => CropPage(path: p, cands: [for (final e in cands) e.value])),
     );
-    if (r == null || !mounted) return;
-    saveCrop(item.path, r.isEmpty ? null : r);
+    if (!mounted) return;
+    if (sig() != before) {
+      // الصورة اتدوّرت من جوه شاشة القص
+      await FileImage(File(p)).evict();
+      imageCache.clear();
+      changed = true;
+      setState(() => rev++);
+    }
+    if (r == null) return;
+    if (r.clear) {
+      saveCrop(p, null);
+      saveMerge(p, null);
+    } else {
+      saveCrop(p, r.quads);
+      saveMerge(p, r.merged);
+    }
     changed = true;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(r.isEmpty
-          ? 'اتمسح القص اليدوي، الـ PDF هيرجع للقص التلقائي.'
-          : 'اتحفظ القص ✓ هيتطبق على الـ PDF أول ما تخلّص المراجعة.'),
+      content: Text(r.clear
+          ? 'اتمسح القص والضم، الـ PDF هيرجع للوضع التلقائي.'
+          : 'اتحفظ ✓ (${r.quads!.length} باتش${r.merged.isNotEmpty ? ' + ${r.merged.length} مضموم' : ''}) هيتطبق على الـ PDF أول ما تخلّص المراجعة.'),
     ));
     setState(() {});
   }
@@ -9104,6 +9471,17 @@ class _ReviewPageState extends State<ReviewPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _problemsBox(it),
+          if (cropOf(it.path) != null || mergeOf(it.path).isNotEmpty || mergedInto(it.path) != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                  [
+                    if (cropOf(it.path) != null) '✂️ قص يدوي مطبّق على الباتش ده في الـ PDF',
+                    if (mergeOf(it.path).isNotEmpty) '➕ فيه ${mergeOf(it.path).length} باتش مضموم جنبه في نفس صفحة الـ PDF',
+                    if (mergedInto(it.path) != null) '➕ الباتش ده مضموم لصفحة صورة تانية في الـ PDF (مش بيطلع صفحة لوحده)',
+                  ].join('\n'),
+                  style: TextStyle(color: _tintFg(context, Colors.blue), fontSize: 13)),
+            ),
           if (it.dupSuspect || it.userExcluded)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
@@ -9337,11 +9715,18 @@ class _ReviewPageState extends State<ReviewPage> {
                 label: const Text('تدوير'),
               ),
               const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: cropBatch,
-                icon: const Icon(Icons.crop),
-                label: const Text('قص'),
-              ),
+              if (cropOf(it.path) != null || mergeOf(it.path).isNotEmpty)
+                FilledButton.tonalIcon(
+                  onPressed: cropBatch,
+                  icon: const Icon(Icons.crop),
+                  label: const Text('قص ✓'),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: cropBatch,
+                  icon: const Icon(Icons.crop),
+                  label: const Text('قص'),
+                ),
               const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
