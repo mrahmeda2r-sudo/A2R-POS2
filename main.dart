@@ -17,8 +17,6 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:excel/excel.dart' as ex;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -104,112 +102,6 @@ Widget _mini(IconData icon, String label, VoidCallback? onPressed, {bool filled 
   return filled
       ? FilledButton.tonalIcon(onPressed: onPressed, icon: ic, label: Text(label), style: st)
       : OutlinedButton.icon(onPressed: onPressed, icon: ic, label: Text(label), style: st);
-}
-
-Widget _periodRow(int days, bool busy, void Function(int) onPick) => Row(
-      children: [
-        const Text('الفترة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Wrap(
-            spacing: 6,
-            children: [
-              for (final o in const [
-                [0, 'اليوم'],
-                [1, 'يومين'],
-                [2, '3 أيام'],
-                [-1, 'الكل'],
-              ])
-                ChoiceChip(
-                  label: Text(o[1] as String, style: const TextStyle(fontSize: 13)),
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  selected: days == o[0],
-                  onSelected: busy ? null : (_) => onPick(o[0] as int),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-
-Widget _filterRow(bool reviewOnly, int all, int review, void Function(bool) onPick) => Row(
-      children: [
-        const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Wrap(
-            spacing: 6,
-            children: [
-              ChoiceChip(
-                label: Text('الكل ($all)', style: const TextStyle(fontSize: 13)),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                selected: !reviewOnly,
-                onSelected: (_) => onPick(false),
-              ),
-              ChoiceChip(
-                label: Text('مراجعة ($review)', style: const TextStyle(fontSize: 13)),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                selected: reviewOnly,
-                onSelected: (_) => onPick(true),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-
-// أيقونة صغيرة جنب صف المسار (فتح / نقل)
-Widget _pathAct(IconData icon, String ar, String en, VoidCallback? onTap) => Builder(
-      builder: (c) => IconButton(
-        tooltip: _l(c, ar, en),
-        icon: Icon(icon, size: 18),
-        visualDensity: VisualDensity.compact,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-        onPressed: onTap,
-      ),
-    );
-
-Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
-    {VoidCallback? onReset, List<Widget> actions = const []}) {
-  final bs = TextButton.styleFrom(
-    visualDensity: VisualDensity.compact,
-    padding: const EdgeInsets.symmetric(horizontal: 8),
-    minimumSize: const Size(0, 32),
-    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-  );
-  return GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    onLongPress: onReset, // ضغطة مطوّلة = رجوع للافتراضي
-    child: Row(
-      children: [
-        Icon(icon, size: 18),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Builder(
-                builder: (c) => Text(label,
-                    style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.onSurfaceVariant)),
-              ),
-              Text(path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textDirection: TextDirection.ltr,
-                  style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-        ...actions,
-        if (onReset != null) _pathAct(Icons.settings_backup_restore, 'رجوع للافتراضي', 'Back to default', onReset),
-        TextButton(onPressed: onPick, style: bs, child: const Text('تغيير')),
-      ],
-    ),
-  );
 }
 
 // ───────── شرائح المصدر / الفترة / الإخراج (بدل القسم القابل للفتح) ─────────
@@ -430,11 +322,21 @@ Widget _outputCard(
   );
 }
 
-Widget _settingsCard(List<Widget> children) => Card(
+// كارت الإعدادات مطوي في سطر ملخّص واحد (المصدر • الفترة • المخرجات) وبالضغط عليه يفتح بكل الإعدادات
+Widget _settingsCollapsed(BuildContext context, String summary, List<Widget> children) => Card(
       margin: const EdgeInsets.only(bottom: 6),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 10),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+          dense: true,
+          maintainState: true,
+          leading: const Icon(Icons.tune, size: 20),
+          title: Text(summary, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+          children: [Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children)],
+        ),
       ),
     );
 
@@ -497,9 +399,9 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
           radio('⚡ سريع متوازي (الأسرع - الافتراضي)', 'بيقرا صفحتين مع بعض من صور الـ PDF مباشرة', countEngine == 0, () => setCountEngine(0)),
           radio('سريع عادي', 'نفس السريع بس صفحة ورا صفحة (أخف على الذاكرة)', countEngine == 1, () => setCountEngine(1)),
           head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
-          radio('طريقة 3: تسلسل رأسي (الأساسية)', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
+          radio('طريقة 3: تسلسل رأسي', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
           radio('طريقة 2: علامات الدفع بس', 'RRN / AMOUNT / Approved', countMethod == 2, () => setCountMethod(2)),
-          radio('طريقة 1: أكبر علامة', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
+          radio('طريقة 1: أكبر علامة (الافتراضية)', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
           head('إضافات (علّم على اللي عايزه)'),
           chk('تدقيق مزدوج لآخر صفحة', 'قراءة تانية بصورة محسّنة - أدق وأبطأ شوية', dualCount, (v) {
             dualCount = v;
@@ -517,7 +419,7 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
                       onChanged();
                     },
               icon: const Icon(Icons.restart_alt, size: 18),
-              label: const Text('رجوع للإعدادات الافتراضية (الأسرع)', style: TextStyle(fontSize: 12)),
+              label: const Text('رجوع للإعدادات الافتراضية', style: TextStyle(fontSize: 12)),
             ),
           ),
         ],
@@ -549,7 +451,13 @@ Widget _statusBox(String text) => Builder(
 
 // ───────── نقل/نسخ ملفات لفولدر بيختاره المستخدم من متصفح ملفات التليفون ─────────
 // بيرجّع خريطة (المسار القديم ← الجديد) للملفات اللي اتنقلت/اتنسخت، أو null لو اتلغى
-Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths) async {
+String _todayFolderName() {
+  final n = DateTime.now();
+  return '${n.day}.${n.month}';
+}
+
+Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths,
+    {String? forceMode, bool allowMove = true}) async {
   final existing = paths.where((p) => File(p).existsSync()).toList();
   if (existing.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -557,15 +465,16 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     );
     return null;
   }
-  final mode = await showDialog<String>(
+  final mode = forceMode ?? await showDialog<String>(
     context: context,
     builder: (c) => AlertDialog(
       title: const Text('نقل الملفات'),
-      content: Text('${existing.length} ملف. اختار فولدر من التليفون، وبعدين الملفات تتنقل أو تتنسخ ليه.'),
+      content: Text('${existing.length} ملف. اختار مكان من التليفون، وهيتعمل فيه فولدر بتاريخ النهارده (${_todayFolderName()}) والملفات تتحط جواه.'
+          '${allowMove ? '' : '\n\nالنقل هيتفعل لما العد يخلص. دلوقتي النسخ بس.'}'),
       actions: [
         TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
         TextButton(onPressed: () => Navigator.pop(c, 'copy'), child: const Text('نسخ')),
-        FilledButton(onPressed: () => Navigator.pop(c, 'move'), child: const Text('نقل')),
+        FilledButton(onPressed: allowMove ? () => Navigator.pop(c, 'move') : null, child: const Text('نقل')),
       ],
     ),
   );
@@ -611,6 +520,13 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     );
   }
   if (dir == null) return null;
+  // فولدر بتاريخ النهارده (مثلاً 14.11) جوا المكان اللي اخترته، والملفات بتتحط جواه
+  final folderName = _todayFolderName();
+  try {
+    final sub = Directory('$dir/$folderName');
+    if (!sub.existsSync()) sub.createSync(recursive: true);
+    dir = sub.path;
+  } catch (_) {}
   final done = <String, String>{};
   var failed = 0;
   for (final p in existing) {
@@ -640,7 +556,7 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(
-          '${mode == 'move' ? 'اتنقل' : 'اتنسخ'} ${done.length} ملف${failed > 0 ? ' • فشل $failed' : ''}'),
+          '${mode == 'move' ? 'اتنقل' : 'اتنسخ'} ${done.length} ملف لفولدر $folderName${failed > 0 ? ' • فشل $failed' : ''}'),
     ));
   }
   return done;
@@ -681,15 +597,15 @@ Widget _scanBar({
         final Widget child;
         if (busy) {
           final stepTxt = step == 1
-              ? ' • الباتشات (1 من 2)'
+              ? ' • التقفيل (1 من 2)'
               : step == 2
-                  ? ' • الملفات (2 من 2)'
+                  ? ' • إيصالات الدفع (2 من 2)'
                   : '';
           final pct = (progress != null && progress > 0) ? ' • ${(progress * 100).round()}%' : '';
           child = FilledButton.icon(
             onPressed: stopReq ? null : onStop,
             style: FilledButton.styleFrom(
-                backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
+                backgroundColor: Theme.of(c).colorScheme.error, foregroundColor: Theme.of(c).colorScheme.onError),
             icon: const Icon(Icons.stop),
             label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt$pct'),
           );
@@ -723,7 +639,7 @@ Widget _scanBar({
     );
 
 // قايمة ⋮ الموحّدة (المظهر، الخلفية، الصيانة، الإصدار)
-Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallback onLog}) {
+Widget _moreMenu(BuildContext context, {required bool busy}) {
   final ar = AppSettings.of(context).isAr;
   return PopupMenuButton<String>(
     tooltip: tr('المزيد'),
@@ -734,10 +650,8 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
         askBatteryExempt(force: true);
       } else if (v == 'resetApps') {
         resetDefaultHandlers(context);
-      } else if (v == 'log') {
-        onLog();
-      } else if (v == 'machines') {
-        openMachinesManager(context);
+      } else if (v == 'resetSettings') {
+        resetAllSettings(context);
       } else if (v == 'autolog') {
         showAutoLog(context);
       } else if (v == 'wipe') {
@@ -752,11 +666,10 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
       PopupMenuItem(
           value: 'resetApps', child: w.Text(ar ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
       PopupMenuItem(
-          value: 'machines',
+          value: 'resetSettings',
           enabled: !busy,
-          child: w.Text(ar ? 'إدارة الماكينات' : 'Manage machines')),
-      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص التلقائي' : 'Auto-scan log')),
-      PopupMenuItem(value: 'log', child: w.Text(ar ? 'مشاركة اللوج' : 'Share log')),
+          child: w.Text(ar ? '↩️ رجّع كل الإعدادات للافتراضي' : '↩️ Reset all settings to default')),
+      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص' : 'Scan log')),
       const PopupMenuDivider(),
       PopupMenuItem(
           value: 'wipe',
@@ -774,19 +687,19 @@ Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallbac
     borderRadius: BorderRadius.circular(30),
     onTap: onTap,
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           CircleAvatar(
-            radius: 24,
+            radius: 17,
             backgroundColor: onTap == null ? cs.surfaceContainerHighest : cs.primaryContainer,
-            child: Icon(icon, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
+            child: Icon(icon, size: 19, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Text(label,
               style: TextStyle(
-                  fontSize: 12, color: onTap == null ? Theme.of(context).disabledColor : null)),
+                  fontSize: 11, color: onTap == null ? Theme.of(context).disabledColor : null)),
         ],
       ),
     ),
@@ -1006,22 +919,6 @@ class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  void toggleLang() {
-    langCode = isAr ? 'en' : 'ar';
-    try {
-      _prefs?.setString('lang', langCode!);
-    } catch (_) {}
-    notifyListeners();
-  }
-
-  void setDark(bool dark) {
-    themeMode = dark ? ThemeMode.dark : ThemeMode.light;
-    try {
-      _prefs?.setString('theme_mode', dark ? 'dark' : 'light');
-    } catch (_) {}
-    notifyListeners();
-  }
-
   // أي ويدجت بتنده عليها بتتسجّل وبتتحدّث لوحدها لما اللغة تتغير
   static AppSettings of(BuildContext context) {
     final s = context.dependOnInheritedWidgetOfExactType<_LangScope>();
@@ -1040,6 +937,7 @@ const List<String> kSeedNamesEn = ['Teal', 'Blue', 'Indigo', 'Green', 'Orange', 
 
 // ───────── حالة مشتركة بين التابين ─────────
 final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<int, int>{}); // رقم الماكينة -> عدد معاملات الباتش
+final ValueNotifier<int> settingsResetSignal = ValueNotifier<int>(0); // بيتغير لما "رجّع كل الإعدادات للافتراضي" يخلص
 final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
 bool homeBusyG = false;
 bool machBusyG = false;
@@ -1094,6 +992,11 @@ void quickMarkSeen(Iterable<String> keys) {
 // ───────── الفحص الشامل: الباتشات (التقفيل) ثم الملفات (إيصالات الدفع) ورا بعض ─────────
 bool chainRunning = false;
 bool chainAbort = false;
+
+// بيترمي من جوه حلقات الصفحات/الصور لما تضغط إيقاف، علشان الفحص يقف في ثواني مش بعد ما الملف الكبير يخلص
+class ScanStopped implements Exception {
+  const ScanStopped();
+}
 bool homeAutoG = false;
 bool machAutoG = false;
 final ValueNotifier<int> chainStep = ValueNotifier<int>(0); // 0 = واقف، 1 = الباتشات، 2 = الملفات
@@ -1121,7 +1024,7 @@ Future<void> runAllScans() async {
   } catch (_) {}
   await askBatteryExempt();
   try {
-    await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'جاري الفحص الشامل (باتشات + ملفات)...'});
+    await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'جاري الفحص الشامل (التقفيل + إيصالات الدفع)...'});
   } catch (_) {}
   try {
     await _chan.invokeMethod('keepScreenOn', {'on': true});
@@ -1153,8 +1056,8 @@ Future<void> runAllScans() async {
     final hs = homeSumG?.call() ?? '';
     final ms = machSumG?.call() ?? '';
     chainSummary.value = '${aborted ? 'اتوقف الفحص الشامل.' : 'اكتمل الفحص الشامل ✓'}\n'
-        '• الباتشات: $hs\n'
-        '• الملفات: $ms\n'
+        '• التقفيل: $hs\n'
+        '• إيصالات الدفع: $ms\n'
         '⏱ الوقت المستغرق: ${fmtElapsed(chainSw.elapsed)}';
     if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
       try {
@@ -1469,6 +1372,53 @@ Future<bool> confirmSend(BuildContext context, {int review = 0, int missing = 0,
   return r == true;
 }
 
+// رجّع كل الإعدادات للافتراضي: المظهر واللغة واللون، الفولدرات (المصدر والمخرجات)، الفترة، الفحص التلقائي،
+// طرق العد، التطبيقات الافتراضية. مش بيمس: الإيصالات والنتايج والتصحيحات والملفات.
+Future<void> resetAllSettings(BuildContext context) async {
+  final ar = AppSettings.of(context).isAr;
+  final m = ScaffoldMessenger.of(context);
+  if (homeBusyG || machBusyG) {
+    m.showSnackBar(SnackBar(
+        content: w.Text(ar ? 'استنى لحد ما المعالجة تخلص أو وقّفها الأول.' : 'Wait for processing to finish or stop it first.')));
+    return;
+  }
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: w.Text(ar ? 'رجّع كل الإعدادات للافتراضي؟' : 'Reset all settings to default?'),
+      content: w.Text(ar
+          ? 'هيرجع للافتراضي:\n• المظهر واللغة واللون\n• فولدر المصدر وفولدر المخرجات\n• الفترة (اليوم)\n• الفحص التلقائي والصور المقلوبة\n• طرق العد\n• التطبيقات الافتراضية للفتح\n\nمش هيتمس: الإيصالات ونتايج الفحص والتصحيحات والملفات.'
+          : 'Will be reset:\n• Theme, language and color\n• Source and output folders\n• Period (today)\n• Auto-scan and flipped-image scan\n• Counting methods\n• Default apps for opening files\n\nNot touched: receipts, scan results, corrections and files.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'إلغاء' : 'Cancel')),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: w.Text(ar ? 'رجّع للافتراضي' : 'Reset'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  resetCountDefaults();
+  try {
+    final cfg = _readCfg();
+    for (final k in const [
+      'folder', 'out', 'pdfDir', 'mOut', 'autoScan', 'autoScanM', 'fastCount', 'dualCount', 'parallelCount',
+      'countEngine', 'countMethod', 'redFixCount', 'consensusGuard', 'defFolder', 'defImage', 'defPdf', 'batteryAsked'
+    ]) {
+      cfg.remove(k);
+    }
+    _writeCfg(cfg);
+  } catch (_) {}
+  sharedDays.value = 0;
+  appSettings.setMode(ThemeMode.system);
+  appSettings.setLang(null);
+  appSettings.setSeed(kDefaultSeed);
+  settingsResetSignal.value++;
+  m.showSnackBar(SnackBar(
+      content: w.Text(appSettings.isAr ? 'رجعت كل الإعدادات للافتراضي ✓' : 'All settings reset to default ✓')));
+}
+
 // مسح كل حاجة: ملفات الإخراج + الصور + نتايج الفحص + التصحيحات + اللوج + الكاش والملفات المؤقتة (الإعدادات واللغة والثيم بيفضلوا)
 Future<void> wipeEverything(BuildContext context) async {
   final ar = AppSettings.of(context).isAr;
@@ -1488,7 +1438,8 @@ Future<void> wipeEverything(BuildContext context) async {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'إلغاء' : 'Cancel')),
         FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error, foregroundColor: Theme.of(ctx).colorScheme.onError),
           onPressed: () => Navigator.pop(ctx, true),
           child: w.Text(ar ? 'امسح كل حاجة' : 'Wipe everything'),
         ),
@@ -1570,7 +1521,7 @@ Future<void> wipeEverything(BuildContext context) async {
       }
     }
   } catch (_) {}
-  for (final p in [fixPath, mStatePath, '$baseDir/id_debug.txt']) {
+  for (final p in [fixPath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
     final f = File(p);
     if (f.existsSync()) delFile(f);
   }
@@ -1611,16 +1562,6 @@ void _syncBadge(ValueNotifier<int> n, int v) {
   WidgetsBinding.instance.addPostFrameCallback((_) => n.value = v);
 }
 
-Future<void> shareDebugLog(BuildContext context) async {
-  final m = ScaffoldMessenger.of(context);
-  final f = File('$baseDir/id_debug.txt');
-  if (!f.existsSync()) {
-    m.showSnackBar(const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')));
-    return;
-  }
-  await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج التطبيق');
-}
-
 ThemeData _buildTheme(Brightness b) {
   final cs = ColorScheme.fromSeed(seedColor: kSeeds[appSettings.seedIndex], brightness: b);
   return ThemeData(
@@ -1648,6 +1589,49 @@ ThemeData _buildTheme(Brightness b) {
     inputDecorationTheme: InputDecorationTheme(
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
     ),
+    // أزرار بنفس الشكل والارتفاع في كل التطبيق
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(0, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        side: BorderSide(color: cs.outline),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: cs.surfaceContainerLow,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    ),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+    chipTheme: ChipThemeData(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      side: BorderSide(color: cs.outlineVariant),
+    ),
+    dividerTheme: DividerThemeData(color: cs.outlineVariant, space: 1, thickness: 1),
   );
 }
 
@@ -1793,15 +1777,26 @@ const List<List<String>> _kEnRules = [
 
 // مرتبة من الأطول للأقصر علشان العبارات الطويلة تتبدّل الأول
 const List<List<String>> _kEnPhrases = [
+  ['بدأ فحص التقفيل', 'Closing scan started'],
+  ['بدأ فحص إيصالات الدفع', 'Payment receipts scan started'],
+  ['انتهى فحص التقفيل', 'Closing scan finished'],
+  ['انتهى فحص إيصالات الدفع', 'Payment receipts scan finished'],
+  ['اتوقف فحص التقفيل', 'Closing scan stopped'],
+  ['اتوقف فحص إيصالات الدفع', 'Payment receipts scan stopped'],
+  ['فحص التقفيل وقف بخطأ', 'Closing scan failed with an error'],
+  ['ضمن الفحص الشامل', 'part of the full scan'],
+  ['صور محددة يدوياً', 'manually selected images'],
+  ['ملفات محددة يدوياً', 'manually selected files'],
+
   ['متوازي (تجريبي)', 'parallel (experimental)'],
   ['متوازي', 'parallel'],
   ['الوقت المستغرق:', 'Time taken:'],
   ['Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع', 'Terminal ID unclear; unit determined from Merchant ID/name inside the PDF, review'],
   ['الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه', 'This file does not look like a machine receipt (weak Terminal ID reading), review it'],
   ['الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ', 'Unit was determined by name/merchant only - verify the machine and tap Save'],
-  ['اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.', 'Tap "Run full processing" to collect the images and generate the Excel and PDF.'],
+  ['اضغط "فحص التقفيل" لسحب الصور وتوليد الإكسيل والـ PDF.', 'Tap "Scan closing" to collect the images and generate the Excel and PDF.'],
   ['التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش', 'The app ignored this image because it looks like a payment receipt or a document, not a batch'],
-  ['اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.', 'Tap "Scan & rename" to scan payment receipts from WhatsApp documents.'],
+  ['اضغط "فحص إيصالات الدفع" لفحص إيصالات الدفع من مستندات واتساب.', 'Tap "Scan payment receipts" to scan payment receipts from WhatsApp documents.'],
   ['مفيش صور (في الفترة المحددة) ولا ملفات PDF في المجلد المختار', 'No images (in the selected period) and no PDF files in the selected folder'],
   ['العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد', 'Counting stopped more than once (the app closed). From ⋮ choose Recount'],
   ['مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن', 'Not counted in the total until you decide. Zoom in on the batch and compare'],
@@ -1812,16 +1807,16 @@ const List<List<String>> _kEnPhrases = [
   ['ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي', 'appeared in another image with a different amount - counted as an extra batch'],
   ['فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)', 'Contains a closing/summary/reprint receipt (ignored, not counted)'],
   ['فولدر الإخراج ده عام، فهيتمسح بس ملفات التطبيق منه', 'this output folder is shared, so only the app files will be deleted from it'],
-  ['عدد إيصالات الدفع: لسه ما اتعدّش (اضغط بدء العد)', 'Payment receipts count: not counted yet (tap Start counting)'],
+  ['عدد إيصالات الدفع: لسه ما اتعدّش (اضغط فحص إيصالات الدفع)', 'Payment receipts count: not counted yet (tap Scan payment receipts)'],
   ['مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك', 'Could not find the WhatsApp documents folder. Pick a folder manually'],
   ['اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه', 'Ignored: looks like a payment receipt/document, not a batch - review it'],
-  ['ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه', 'file(s) not counted yet, tap "Scan" and it will continue where it left off'],
+  ['ملف لسه ما اتعدّش، اضغط "فحص إيصالات الدفع" وهيكمّل من مكانه', 'file(s) not counted yet, tap "Scan" and it will continue where it left off'],
   ['يجب منح إذن الوصول إلى جميع الملفات للمتابعة', 'You must grant all-files access to continue'],
   ['لا توجد صور في مجلد الواتساب بالفترة المحددة', 'No images in the WhatsApp folder for the selected period'],
   ['تعذر العثور على مجلد صور الواتساب تلقائياً', 'Could not find the WhatsApp images folder automatically'],
   ['مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل', 'Cannot read the amount or the unit - tap Edit'],
   ['ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف', 'possibly missing receipts or unread ones, check the file'],
-  ['ملف لسه ما اتعدّش. اضغط "بدء العد" لما تحب', 'file(s) not counted yet. Tap "Start counting" when you want'],
+  ['ملف لسه ما اتعدّش. اضغط "فحص إيصالات الدفع" لما تحب', 'file(s) not counted yet. Tap "Scan payment receipts" when you want'],
   ['الماكينة/الوحدة اتحددت تلقائياً - اتأكد', 'Machine/unit was determined automatically - verify'],
   ['مشكوك إنه مكرر - مش محسوب لحد ما تراجعه', 'Possible duplicate - not counted until reviewed'],
   ['صورة، ولم يتم العثور على إيصالات مطابقة', 'image(s), and no matching receipts were found'],
@@ -1847,11 +1842,11 @@ const List<List<String>> _kEnPhrases = [
   ['مفيش لوج لسه. شغّل الفحص الأول', 'No log yet. Run the scan first'],
   ['جاري البحث عن مجلدات الصور...', 'Searching for image folders...'],
   ['إعادة تسمية الصور وترتيبها...', 'Renaming and sorting images...'],
-  ['اضغط "بدء العد" لعدّ إيصالاته', 'Tap "Start counting" to count its receipts'],
+  ['اضغط "فحص إيصالات الدفع" لعدّ إيصالاته', 'Tap "Scan payment receipts" to count its receipts'],
   ['صفحات الطريقتين اختلفوا فيها:', 'Pages where the two methods differ:'],
-  ['اتعلّم للعد. اضغط "بدء العد".', 'Marked for counting. Tap "Start counting".'],
+  ['اتعلّم للعد. اضغط "فحص إيصالات الدفع".', 'Marked for counting. Tap "Scan payment receipts".'],
   ['مشكوك إنه مكرر: نفس الماكينة', 'Possible duplicate: same machine'],
-  ['اضغط "بدء العد" لعدّ إيصالات', 'Tap "Start counting" to count receipts of'],
+  ['اضغط "فحص إيصالات الدفع" لعدّ إيصالات', 'Tap "Scan payment receipts" to count receipts of'],
   ['صفحات ما لقيتش فيها إيصالات:', 'Pages with no receipts found:'],
   ['العد: سريع ← الدقيق (القديم)', 'Counting: fast, then precise (old)'],
   ['عدد إيصالات الدفع: بيتعدّ...', 'Payment receipts count: counting...'],
@@ -1880,7 +1875,7 @@ const List<List<String>> _kEnPhrases = [
   ['إجمالي بعيد عن المعتاد', 'Total far from usual'],
   ['القراءة التانية للمبلغ', 'The second amount reading'],
   ['صورة من الصور المرتبة', 'image(s) from the sorted images'],
-  ['اختر الماكينة (1..19)', 'Select machine (1..19)'],
+  ['اختر الماكينة (1..25)', 'Select machine (1..25)'],
   ['جاري فحص الإيصالات...', 'Scanning receipts...'],
   ['ولا يوجد ملف PDF باسم', 'and there is no PDF file named'],
   ['لو المبلغ صح اضغط حفظ', 'if the amount is correct, tap Save'],
@@ -1979,11 +1974,20 @@ const List<List<String>> _kEnPhrases = [
   ['حفظ والتالي', 'Save & next'],
   ['اتوقف. فاضل', 'Stopped. Remaining'],
   ['اكتمل العد:', 'Counting complete:'],
-  ['فحص الباتشات والملفات مرة واحدة', 'Scan patches & files in one go'],
-  ['جاري فحص الباتشات', 'Scanning patches'],
-  ['جاري فحص الملفات', 'Scanning files'],
+  ['فحص التقفيل وإيصالات الدفع مرة واحدة', 'Scan closing & payment receipts in one go'],
+  ['جاري فحص التقفيل', 'Scanning closing'],
+  ['جاري فحص إيصالات الدفع', 'Scanning payment receipts'],
   ['اكتمل الفحص الشامل', 'Full scan complete'],
   ['اتوقف الفحص الشامل', 'Full scan stopped'],
+  ['سجل الفحص', 'Scan log'],
+  ['مشاركة السجل', 'Share log'],
+  ['مشاكل بس', 'Problems only'],
+  ['جاري الإيقاف...', 'Stopping...'],
+  ['مفيش سجلات لسه.', 'No log entries yet.'],
+  ['مسح السجل؟', 'Clear the log?'],
+  ['فحص شامل', 'Full scan'],
+  ['يدوي', 'Manual'],
+  ['تلقائي', 'Auto'],
   ['فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (counts each new file by itself and notifies you of the result)'],
   ['فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (checks each new receipt by itself and notifies you of the result)'],
   ['الباقي صح', 'Mark rest OK'],
@@ -2063,7 +2067,14 @@ const List<List<String>> _kEnPhrases = [
   ['فيه', 'There are'],
   ['لسه', 'yet'],
   ['أو', 'or'],
-  ['و', 'and']
+  ['و', 'and'],
+  // عامة: في الآخر علشان العبارات الأطول اللي فوق تتطبق الأول
+  ['إيصال/صورة', 'receipts/images'],
+  ['للمراجعة', 'to review'],
+  ['ناقص', 'missing'],
+  ['ماكينة', 'machine'],
+  ['ملاحظة تانية', 'more notes'],
+  ['إيصال', 'receipt'],
 ];
 
 // ───────────────────── ألوان تتأقلم مع الدارك مود ─────────────────────
@@ -2074,8 +2085,24 @@ Color _tintBg(BuildContext c, MaterialColor m, {bool soft = false, bool strong =
   return strong ? m.shade300 : (soft ? m.shade50 : m.shade100);
 }
 
+// "محتاج مراجعة": برتقالي هادي/مطفي بدل البرتقالي الصافي الفاقع (بيتستخدم في كل التطبيق)
+const MaterialColor kReviewTone = MaterialColor(0xFFDE8E43, <int, Color>{
+  50: Color(0xFFFFF5EC),
+  100: Color(0xFFFCE6D0),
+  200: Color(0xFFF7CFA6),
+  300: Color(0xFFF0B67C),
+  400: Color(0xFFE8A15C),
+  500: Color(0xFFDE8E43),
+  600: Color(0xFFC97A34),
+  700: Color(0xFFAC6429),
+  800: Color(0xFF8C5121),
+  900: Color(0xFF6E3F1A),
+});
+
 Color _tintBorder(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade800;
 Color _tintFg(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade200 : m.shade900;
+// لون أيقونة/نص/خط حالة (أخضر/أحمر/...) مقروء في الفاتح والدارك
+Color _tone(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade700;
 
 // ───────────────────── الهيدر: اسم التطبيق + زراير اللغة والدارك ─────────────────────
 class AppTitle extends StatelessWidget {
@@ -2224,14 +2251,51 @@ class TerminalInfo {
   final int orderNum;
   final int excelRow;
   final String unitName;
-  const TerminalInfo(this.orderNum, this.excelRow, this.unitName);
+  final bool spare; // ماكينة احتياطي: بتتحسب في إجمالي الوحدة ومبتتعدّش ناقصة لو مظهرتش
+  const TerminalInfo(this.orderNum, this.excelRow, this.unitName, {this.spare = false});
 }
 
-// الماكينات والوحدات بتتبني كلها من السجل (registry) اللي تحت. الفهارس دي بتتملي من rebuildFromRegistry
-final Map<String, TerminalInfo> terminals = {};
-final Map<int, String> numToTid = {};
+final Map<String, TerminalInfo> terminals = {
+  "50335710": const TerminalInfo(1, 2, "أبيس"),
+  "50335993": const TerminalInfo(2, 2, "أبيس"),
+  "50335987": const TerminalInfo(3, 2, "أبيس"),
+  "50325716": const TerminalInfo(4, 3, "برج العرب"), // برج العرب 1
+  "50335998": const TerminalInfo(5, 3, "برج العرب"), // برج العرب 2
+  "50335994": const TerminalInfo(6, 3, "برج العرب"), // برج العرب 3
+  "50335711": const TerminalInfo(7, 3, "برج العرب"), // برج العرب 4
+  "50382298": const TerminalInfo(8, 4, "المنتزه"), // المنتزه 1
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2
+  "50383712": const TerminalInfo(10, 4, "المنتزه"), // المنتزه 3
+  "50382306": const TerminalInfo(11, 5, "محرم بك"), // محرم بك 1
+  "50382316": const TerminalInfo(12, 5, "محرم بك"), // محرم بك 2
+  "50382308": const TerminalInfo(13, 6, "العجمي"), // العجمي 1
+  "50383706": const TerminalInfo(14, 6, "العجمي"), // العجمي 2
+  "50382300": const TerminalInfo(15, 7, "القباري"),
+  "50383702": const TerminalInfo(16, 8, "مصطفى كامل"),
+  "50382312": const TerminalInfo(17, 9, "مديرية الأمن"),
+  "50383699": const TerminalInfo(18, 10, "ميناء الإسكندرية"),
+  "50383700": const TerminalInfo(19, 11, "خدمات مصر"),
+  // ───── ماكينات احتياطي (أرقامها بعد 19 عشان مبتتحسبش ناقصة) ─────
+  "50325765": const TerminalInfo(20, 2, "أبيس", spare: true), // أبيس (احتياطي)
+  "50322364": const TerminalInfo(21, 3, "برج العرب", spare: true), // برج العرب (احتياطي 1)
+  "50322361": const TerminalInfo(22, 3, "برج العرب", spare: true), // برج العرب (احتياطي 2)
+  "50382150": const TerminalInfo(23, 4, "المنتزه", spare: true), // المنتزه (احتياطي)
+  "50381092": const TerminalInfo(24, 5, "محرم بك", spare: true), // محرم بك (احتياطي)
+  "50381077": const TerminalInfo(25, 6, "العجمي", spare: true), // العجمي (احتياطي)
+};
 
-// أرقام ترمنل بيقراها الـ OCR غلط -> الرقم الصح
+final Map<int, String> numToTid = {
+  1: "50335710", 2: "50335993", 3: "50335987",
+  4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
+  8: "50382298", 9: "50382315", 10: "50383712",
+  11: "50382306", 12: "50382316",
+  13: "50382308", 14: "50383706",
+  15: "50382300", 16: "50383702", 17: "50382312",
+  18: "50383699", 19: "50383700",
+  20: "50325765", 21: "50322364", 22: "50322361",
+  23: "50382150", 24: "50381092", 25: "50381077",
+};
+
 final Map<String, String> tidFix = {
   "50336994": "50335994",
   "50336711": "50335711",
@@ -2242,12 +2306,22 @@ final Map<String, String> tidFix = {
   "60382308": "50382308",
 };
 
+// (فاضي) المنتزه 3 = 50383712 ماكينة مستقلة
 final Map<String, String> tidAlias = {};
 
-// كود/ID التاجر -> رقم صف الوحدة (بيتملي من السجل)
-final Map<String, int> merchantCodeMap = {};
+final Map<String, int> merchantCodeMap = {
+  "22": 2, "23": 3, "24": 4, "25": 5, "26": 6,
+  "27": 7, "28": 8, "29": 9, "30": 10, "31": 11,
+};
 
-// كلمات بتظهر في الإيصال بتدل على الوحدة (رقم الصف ثابت: 2..11 زي قالب الإكسيل)
+// Merchant ID للوحدة: 0011470 + كود الوحدة (22..31) + 084، مثال برج العرب 001147023084
+String? merchantIdOfRow(int row) {
+  for (final e in merchantCodeMap.entries) {
+    if (e.value == row) return '0011470${e.key}084';
+  }
+  return null;
+}
+
 final List<MapEntry<List<String>, int>> nameHints = [
   MapEntry(["ABYSS", "ABIS"], 2),
   MapEntry(["BURJ", "BORG"], 3),
@@ -2261,765 +2335,83 @@ final List<MapEntry<List<String>, int>> nameHints = [
   MapEntry(["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
 ];
 
-final Map<int, String> rowNames = {};
+final Map<int, String> rowNames = {
+  2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك",
+  6: "العجمي", 7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن",
+  10: "ميناء الإسكندرية", 11: "خدمات مصر",
+};
 
-// ───────────── استخراج اسم الوحدة والـ Merchant ID من الإيصال ─────────────
-int _editDistance(String a, String b) {
-  if (a == b) return 0;
-  if (a.isEmpty) return b.length;
-  if (b.isEmpty) return a.length;
-  var prev = List<int>.generate(b.length + 1, (i) => i);
-  for (var i = 1; i <= a.length; i++) {
-    final cur = List<int>.filled(b.length + 1, 0);
-    cur[0] = i;
-    for (var j = 1; j <= b.length; j++) {
-      final cost = a[i - 1] == b[j - 1] ? 0 : 1;
-      cur[j] = math.min(math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
-    }
-    prev = cur;
+// ───────── ماكينات جديدة (TID مختلف) لوحدة موجودة: بتتعرف من الـ Merchant ID أو اسم الوحدة وبتتحفظ ─────────
+const int kMainMachines = 19; // الماكينات الأساسية: فحص الماكينات الناقصة عليها بس
+const int kBaseMachines = 25; // الأساسي + الاحتياطي المكتوبين في الكود (الماكينات الجديدة بتاخد رقم بعدهم)
+final Set<String> _extraTids = {};
+String get _extraTermPath => '$baseDir/extra_terminals.json';
+
+int get machineCount {
+  var m = 0;
+  for (final k in numToTid.keys) {
+    if (k > m) m = k;
   }
-  return prev[b.length];
+  return m;
 }
 
-String _normUnit(String s) => s.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9\u0600-\u06FF]'), '');
-
-String? _cleanUnitName(String raw) {
-  final s = raw
-      .replaceAll(RegExp(r'[^A-Za-z0-9\u0600-\u06FF \-]'), ' ')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
-  final letters = RegExp(r'[A-Za-z\u0600-\u06FF]').allMatches(s).length;
-  final digits = RegExp(r'\d').allMatches(s).length;
-  if (letters < 4 || digits > letters) return null;
-  return s.length > 40 ? s.substring(0, 40).trim() : s;
-}
-
-// اسم الوحدة المكتوب على الإيصال: بعد كلمة MERCHANT NAME لو موجودة، وإلا أول سطر اسم في أعلى الإيصال
-String? extractUnitName(List<String> texts) {
-  final label = RegExp(r'MERCHANT\s*NAME\s*[:\-]?\s*(.+)', caseSensitive: false);
-  for (final t in texts) {
-    for (final l in t.split('\n')) {
-      final m = label.firstMatch(l.trim());
-      if (m != null) {
-        final n = _cleanUnitName(m.group(1)!);
-        if (n != null) return n;
-      }
-    }
-  }
-  // إيصالات NBE: اسم الوحدة بيبقى سطر بالشكل "EC <الاسم> TRF" (حتى لو OCR دمجه مع سطر تاني)
-  final ecRe = RegExp(r'\bE\s?C\s+([A-Z0-9][A-Z0-9 \-]{2,40}?)\s+TR[FE]\b');
-  final ecFound = <String>[];
-  for (final t in texts) {
-    for (final l in t.split('\n')) {
-      final m = ecRe.firstMatch(l.toUpperCase());
-      if (m != null) {
-        final n = _cleanUnitName('EC ${m.group(1)!.trim()} TRF');
-        if (n != null) ecFound.add(n);
-      }
-    }
-  }
-  final ecBest = mostCommon(ecFound)?.key;
-  if (ecBest != null) return ecBest;
-  final skip = RegExp(
-      r'NATIONAL|BANK|\bNBE\b|EGYPT|RECEIPT|CUSTOMER|COPY|MERCHANT|TERMINAL|BATCH|DATE|TIME|SALE|TOTAL|AMOUNT|VISA|MASTER|MEEZ|THANK|SUCCESS|CLOSED|CARD|APPROVAL|\bRRN\b|TRACE|VERSION|GRAND|REPORT|SETTLEMENT|\bST\b|STREET|ALEX|CAIRO|\b02F\b|INSIDE|NEXT\s*TO|\bFRON',
-      caseSensitive: false);
-  // اسم الوحدة بيبقى تحت سطر "NATIONAL BANK OF EGYPT" على طول (قبل سطر العنوان)
-  final bankLine = RegExp(r'BANK\s*OF\s*EGYPT|NATIONAL\s*BANK|^\s*NBE\s*$', caseSensitive: false);
-  for (final t in texts) {
-    final ls = t.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-    for (var i = 0; i < ls.length; i++) {
-      if (!bankLine.hasMatch(ls[i])) continue;
-      for (var j = i + 1; j < ls.length && j <= i + 3; j++) {
-        if (skip.hasMatch(ls[j])) continue;
-        final n = _cleanUnitName(ls[j]);
-        if (n != null) return n;
-      }
-      break;
-    }
-  }
-  for (final t in texts) {
-    var seen = 0;
-    for (final raw in t.split('\n')) {
-      final l = raw.trim();
-      if (l.isEmpty) continue;
-      if (++seen > 8) break;
-      if (skip.hasMatch(l)) continue;
-      final n = _cleanUnitName(l);
-      if (n != null) return n;
-    }
-  }
-  return null;
-}
-
-// الـ MERCHANT ID المكتوب على الإيصال (الأكتر تكراراً بين القراءات)
-// 1) الشكل المعتاد: كلمة MERCHANT ID (أو غلطات قراءتها زي 1D / MID) وبعدها الرقم، حتى لو في سطر تاني.
-//    ما بيعديش على كلمة TERMINAL / TID علشان ما ياخدش رقم الترمنل بالغلط.
-// 2) احتياطي: لو الكلمة موجودة والرقم بعيد عنها (الـ OCR لخبط ترتيب الأسطر): رقم واحد بس من 10 لـ 16 رقم في النص.
-//    لو فيه أكتر من رقم أو النص إيصال دفع (RRN / APPROVAL): مفيش تخمين، بيرجّع null ويتنبّه عليه.
-String? extractMerchantId(List<String> texts) {
-  final found = <String>[];
-  final re = RegExp(
-      r"(?:MERCH\w*\s*(?:ID|I0|1D|IO|10|NO|N0)|\bMID)\W{0,3}(?:(?!TERMINAL|TID|\d)[\s\S]){0,40}?(\d[\d\s/]{6,18}\d)",
-      caseSensitive: false);
-  for (final t in texts) {
-    for (final m in re.allMatches(t)) {
-      final d = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-      if (d.length >= 8 && d.length <= 16) found.add(d);
-    }
-  }
-  final best = mostCommon(found)?.key;
-  if (best != null) return best;
-  final hint = RegExp(r'MERCH|\bMID\b', caseSensitive: false);
-  final payish = RegExp(r'RRN|APPROVAL|AUTH', caseSensitive: false);
-  final lone = RegExp(r'(?<![\d*])(\d[\d ]{8,20}\d)(?![\d*])');
-  for (final t in texts) {
-    if (!hint.hasMatch(t) || payish.hasMatch(t)) continue;
-    final c = <String>{};
-    for (final m in lone.allMatches(t)) {
-      final d = m.group(1)!.replaceAll(RegExp(r'\D'), '');
-      if (d.length >= 10 && d.length <= 16) c.add(d);
-    }
-    if (c.length == 1) return c.first;
-  }
-  return null;
-}
-
-
-final ValueNotifier<int> registryRev = ValueNotifier<int>(0);
-bool registryDirty = false;
-final String settingsPath = '$baseDir/A2R_Settings.xlsx';
-
-// ════════════════════════════════════════════════════════════════════
-// سجل الماكينات (المصدر الأساسي). سطر واحد = ماكينة واحدة، والترتيب في القايمة = رقم الماكينة (index + 1)
-// tid فاضي = مكان محجوز (ماكينة لسه ما اشتغلتش)
-// ════════════════════════════════════════════════════════════════════
-class MachineRow {
-  String tid;
-  String unit; // اسم الوحدة (عربي أو إنجليزي)
-  String merchant; // MERCHANT ID: هو اللي بيجمّع الماكينات في إجمالي واحد
-  String status; // active | off (إجازة)
-  bool auto; // اتعلّمت تلقائي من الفحص
-  bool lockName; // الاسم اتعدّل يدوي: الفحص ما يغيّرهوش
-  bool lockMerch;
-  String flag; // new-unit | no-merchant | by-name  (للمراجعة)
-  bool unplaced; // اتعلّمت في فحص بعد الأول ولسه ما اتحطتش تحت وحدتها
-  Map<String, int> votes; // تصويت على الاسم من الإيصالات
-  int row = 0; // رقم الوحدة (بيتحسب من الـ Merchant ID، مش بيتحفظ)
-
-  MachineRow({
-    this.tid = '',
-    this.unit = '',
-    this.merchant = '',
-    this.status = 'active',
-    this.auto = false,
-    this.lockName = false,
-    this.lockMerch = false,
-    this.flag = '',
-    this.unplaced = false,
-    Map<String, int>? votes,
-  }) : votes = votes ?? <String, int>{};
-
-  bool get reserved => tid.isEmpty;
-
-  Map<String, dynamic> toJson() => {
-        'tid': tid,
-        'unit': unit,
-        'merchant': merchant,
-        'status': status,
-        'auto': auto,
-        'lockName': lockName,
-        'lockMerch': lockMerch,
-        'flag': flag,
-        'unplaced': unplaced,
-        'votes': votes,
-      };
-
-  static MachineRow fromJson(Map<String, dynamic> j) => MachineRow(
-        tid: (j['tid'] ?? '').toString(),
-        unit: (j['unit'] ?? '').toString(),
-        merchant: (j['merchant'] ?? '').toString(),
-        status: (j['status'] ?? 'active').toString(),
-        auto: j['auto'] == true,
-        lockName: j['lockName'] == true,
-        lockMerch: j['lockMerch'] == true,
-        flag: (j['flag'] ?? '').toString(),
-        unplaced: j['unplaced'] == true,
-        votes: {
-          for (final e in ((j['votes'] as Map?) ?? {}).entries) e.key.toString(): (e.value as num).toInt()
-        },
-      );
-}
-
-final List<MachineRow> registry = [];
-final String registryPath = '$baseDir/.app_registry.json';
-bool _regLoaded = false;
-final List<String> registryWarnings = []; // تنبيهات الفحص الحالي
-
-// كود الوحدة القديم داخل الـ Merchant ID: 11470XX084 (XX من 22 لـ 31) -> الوحدات الـ10 الأصلية (صفوف 2..11 في قالب الإكسيل)
-int? _legacyCode(String mid) {
-  final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(mid);
-  return mm == null ? null : int.tryParse(mm.group(1)!);
-}
-
-// تطابق كامل بس. الاستثناءات: كود أقصر (10 أرقام أو أكتر) هو نهاية كود أطول (OCR بيلزّق أرقام زيادة قدّام الكود)،
-// وكودين من الشكل القديم بنفس الـ XX يبقوا نفس الوحدة
-bool merchantEq(String a, String b) {
-  if (a.isEmpty || b.isEmpty) return false;
-  if (a == b) return true;
-  final s = a.length <= b.length ? a : b;
-  final l = a.length <= b.length ? b : a;
-  if (s.length >= 10 && l.endsWith(s)) return true;
-  final ca = _legacyCode(a);
-  return ca != null && ca == _legacyCode(b);
-}
-
-MachineRow? machineByTid(String tid) {
-  for (final m in registry) {
-    if (m.tid == tid) return m;
-  }
-  return null;
-}
-
-// الماكينات اللي لو ما ظهرتش في اليوم تتنبّه عليها: مش المحجوزة ومش الإجازة
-List<int> expectedMachineNums() {
-  final out = <int>[];
-  for (var i = 0; i < registry.length; i++) {
-    final m = registry[i];
-    if (!m.reserved && m.status == 'active') out.add(i + 1);
-  }
-  return out;
-}
-
-String _unitNameOfRow(int row) {
-  for (final m in registry) {
-    if (m.row == row && m.lockName && m.unit.trim().isNotEmpty) return m.unit.trim();
-  }
-  for (final m in registry) {
-    if (m.row == row && m.unit.trim().isNotEmpty) return m.unit.trim();
-  }
-  return 'وحدة $row';
-}
-
-// بيبني الفهارس القديمة من السجل. لازم يتنده بعد أي تغيير في registry
-// رقم صف الوحدة: الوحدات الأصلية (Merchant ID بالشكل القديم) صفها ثابت 2..11 زي قالب الإكسيل مهما اتغيّر الترتيب،
-// والوحدات الجديدة بتاخد 12 وما بعده بترتيب ظهورها.
-void rebuildFromRegistry() {
-  terminals.clear();
-  numToTid.clear();
-  rowNames.clear();
-  merchantCodeMap.clear();
-  final reps = <int, MachineRow>{};
-  var next = 11;
-  for (final m in registry) {
-    int? row;
-    if (m.merchant.isNotEmpty) {
-      for (final e in reps.entries) {
-        if (merchantEq(e.value.merchant, m.merchant)) {
-          row = e.key;
-          break;
-        }
-      }
-    }
-    if (row == null) {
-      final code = _legacyCode(m.merchant);
-      if (code != null && !reps.containsKey(code - 20)) {
-        row = code - 20;
-      } else {
-        row = ++next;
-      }
-      reps[row] = m;
-    }
-    m.row = row;
-  }
-  for (var i = 0; i < registry.length; i++) {
-    final m = registry[i];
-    final name = _unitNameOfRow(m.row);
-    rowNames.putIfAbsent(m.row, () => name);
-    if (m.merchant.isNotEmpty) merchantCodeMap.putIfAbsent(m.merchant, () => m.row);
-    if (!m.reserved) {
-      terminals[m.tid] = TerminalInfo(i + 1, m.row, name);
-      numToTid[i + 1] = m.tid;
-    }
-  }
-}
-
-void saveRegistry() {
+void loadExtraTerminals() {
   try {
-    File(registryPath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(registry.map((m) => m.toJson()).toList()));
+    final f = File(_extraTermPath);
+    if (!f.existsSync()) return;
+    final m = jsonDecode(f.readAsStringSync());
+    if (m is! List) return;
+    for (final e in m) {
+      final tid = e['tid'].toString();
+      final row = e['row'] as int;
+      if (terminals.containsKey(tid) || !rowNames.containsKey(row)) continue;
+      var order = (e['o'] as int?) ?? 0;
+      if (order <= kBaseMachines || numToTid.containsKey(order)) order = machineCount + 1;
+      terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
+      numToTid[order] = tid;
+      _extraTids.add(tid);
+    }
   } catch (e) {
-    _dbg('registry save error: $e');
+    _dbg('extra terminals load error: $e');
   }
 }
 
-// الماكينات الـ19 الأساسية (بترتيبها). الـ Merchant ID مبني على كود الوحدة القديم، وتقدر تعدّله من إدارة الماكينات
-const List<List<Object>> _kSeedMachines = [
-  ['50335710', 'أبيس', 22],
-  ['50335993', 'أبيس', 22],
-  ['50335987', 'أبيس', 22],
-  ['50325716', 'برج العرب', 23],
-  ['50335998', 'برج العرب', 23],
-  ['50335994', 'برج العرب', 23],
-  ['50335711', 'برج العرب', 23],
-  ['50382298', 'المنتزه', 24],
-  ['50382315', 'المنتزه', 24],
-  ['50383712', 'المنتزه', 24],
-  ['50382306', 'محرم بك', 25],
-  ['50382316', 'محرم بك', 25],
-  ['50382308', 'العجمي', 26],
-  ['50383706', 'العجمي', 26],
-  ['50382300', 'القباري', 27],
-  ['50383702', 'مصطفى كامل', 28],
-  ['50382312', 'مديرية الأمن', 29],
-  ['50383699', 'ميناء الإسكندرية', 30],
-  ['50383700', 'خدمات مصر', 31],
-];
-
-String _seedMerchant(int code) => '11470${code}084';
-
-List<MachineRow> _defaultRegistry() => [
-      for (final s in _kSeedMachines)
-        MachineRow(
-          tid: s[0] as String,
-          unit: s[1] as String,
-          merchant: _seedMerchant(s[2] as int),
-          lockName: true,
-          lockMerch: true,
-        ),
+void _saveExtraTerminals() {
+  try {
+    final list = [
+      for (final tid in _extraTids)
+        if (terminals[tid] != null)
+          {'tid': tid, 'row': terminals[tid]!.excelRow, 'o': terminals[tid]!.orderNum}
     ];
-
-// السجل القديم (النسخة الخاصة قبل التحديث) كان Map فيه extras / off / mm / ov.
-// بيتحوّل للشكل الجديد: الـ19 الأساسية + الماكينات الإضافية + الإجازات + الـ Merchant IDs، وبيتحفظ نسخة من القديم.
-List<MachineRow> _migrateOldRegistry(Map j) {
-  final list = _defaultRegistry();
-  const unitOfRow = <int, String>{
-    2: 'أبيس', 3: 'برج العرب', 4: 'المنتزه', 5: 'محرم بك', 6: 'العجمي',
-    7: 'القباري', 8: 'مصطفى كامل', 9: 'مديرية الأمن', 10: 'ميناء الإسكندرية', 11: 'خدمات مصر',
-  };
-  final ids = {for (final m in list) m.tid};
-  final merchOf = <String, String>{};
-  final mm = j['mm'];
-  if (mm is Map) {
-    for (final e in mm.entries) {
-      merchOf[e.key.toString()] = e.value.toString();
-    }
-  }
-  final ov = <String, int>{};
-  final ovRaw = j['ov'];
-  if (ovRaw is Map) {
-    for (final e in ovRaw.entries) {
-      final r = (e.value as num?)?.toInt();
-      if (r != null) ov[e.key.toString()] = r;
-    }
-  }
-  final extras = <Map>[];
-  for (final e in ((j['extras'] as List?) ?? const [])) {
-    if (e is Map) extras.add(e);
-  }
-  extras.sort((a, b) => ((a['o'] as num?) ?? 0).compareTo((b['o'] as num?) ?? 0));
-  for (final e in extras) {
-    final tid = e['tid'].toString();
-    final row = (e['row'] as num?)?.toInt() ?? 0;
-    if (!ids.add(tid)) continue;
-    list.add(MachineRow(
-      tid: tid,
-      unit: unitOfRow[row] ?? 'وحدة $row',
-      merchant: merchOf[tid] ?? (unitOfRow.containsKey(row) ? _seedMerchant(row + 20) : ''),
-      auto: true,
-      lockName: unitOfRow.containsKey(row),
-      lockMerch: merchOf.containsKey(tid) || unitOfRow.containsKey(row),
-    ));
-  }
-  for (final m in list) {
-    final o = ov[m.tid];
-    if (o != null && unitOfRow.containsKey(o)) {
-      m.unit = unitOfRow[o]!;
-      m.merchant = _seedMerchant(o + 20);
-    } else if (merchOf.containsKey(m.tid) && merchOf[m.tid]!.isNotEmpty) {
-      m.merchant = merchOf[m.tid]!;
-    }
-  }
-  final off = <String>{for (final e in ((j['off'] as List?) ?? const [])) e.toString()};
-  for (final m in list) {
-    if (off.contains(m.tid)) m.status = 'off';
-  }
-  return list;
-}
-
-Future<void> loadRegistry() async {
-  if (_regLoaded) return;
-  try {
-    final f = File(registryPath);
-    if (f.existsSync()) {
-      final l = jsonDecode(f.readAsStringSync());
-      if (l is List) {
-        registry.clear();
-        for (final e in l.whereType<Map>()) {
-          registry.add(MachineRow.fromJson(Map<String, dynamic>.from(e)));
-        }
-        _regLoaded = true;
-      } else if (l is Map) {
-        try {
-          f.copySync('$baseDir/.app_registry.old.json');
-        } catch (_) {}
-        registry
-          ..clear()
-          ..addAll(_migrateOldRegistry(l));
-        saveRegistry();
-        _regLoaded = true;
-        _dbg('registry migrated from old format: ${registry.length} machines');
-      }
-    } else {
-      registry
-        ..clear()
-        ..addAll(_defaultRegistry());
-      saveRegistry();
-      _regLoaded = File(registryPath).existsSync();
-    }
+    Directory(baseDir).createSync(recursive: true);
+    File(_extraTermPath).writeAsStringSync(jsonEncode(list));
   } catch (e) {
-    _dbg('registry load error: $e');
-  }
-  if (registry.isEmpty && !_regLoaded) registry.addAll(_defaultRegistry());
-  rebuildFromRegistry();
-}
-
-// ماكينة جديدة ظهرت في إيصال. القواعد:
-//  1) فيه سطر محجوز (TID فاضي) بنفس الـ Merchant ID تمام -> بيملاه (أول واحد بالترتيب)
-//  2) فيه سطر محجوز من غير Merchant ID واسمه يشبه الاسم المقروء -> بيملاه + تنبيه "by-name"
-//  3) غير كده -> بتتضاف في آخر القايمة. وبعد ما الفحص يخلص قراية regroupNewMachines بتنزّلها تحت آخر
-//     ماكينة من نفس الـ Merchant ID (إلا في أول فحص: الترتيب بظهور الباتشات).
-//     لو الـ Merchant ID مش مطابق لأي حاجة: وحدة جديدة + تنبيه.
-String? registerLearned(String tid, String? name, String? mid) {
-  if (machineByTid(tid) != null) return tid;
-  final hadRows = registry.isNotEmpty;
-  final firstScan = registry.every((m) => _learnedThisRun.contains(m.tid));
-  MachineRow? slot;
-  var how = '';
-  if (mid != null) {
-    for (final m in registry) {
-      if (m.reserved && m.merchant.isNotEmpty && merchantEq(m.merchant, mid)) {
-        slot = m;
-        how = 'merchant';
-        break;
-      }
-    }
-  }
-  if (slot == null && name != null) {
-    final k = _normUnit(name);
-    for (final m in registry) {
-      if (!m.reserved || m.merchant.isNotEmpty || m.unit.isEmpty) continue;
-      final o = _normUnit(m.unit);
-      final mx = math.max(o.length, k.length);
-      if (o == k || (mx >= 6 && _editDistance(o, k) <= (mx * 0.15).floor())) {
-        slot = m;
-        how = 'name';
-        break;
-      }
-    }
-  }
-  if (slot != null) {
-    slot.tid = tid;
-    slot.status = 'active';
-    slot.auto = true;
-    if (slot.merchant.isEmpty && mid != null) slot.merchant = mid;
-    if (slot.unit.isEmpty && name != null) slot.unit = name;
-    if (how == 'name') slot.flag = 'by-name';
-    _dbg('RESERVED FILLED ($how) $tid -> ماكينة ${registry.indexOf(slot) + 1}');
-    registryWarnings.add('ماكينة ${registry.indexOf(slot) + 1} (${slot.unit}) اتملت من مكان محجوز'
-        '${how == 'name' ? ' بالاسم فقط - اتأكد' : ''}');
-  } else {
-    var flag = '';
-    if (mid == null) {
-      flag = hadRows ? 'no-merchant' : '';
-    } else if (hadRows && !firstScan && !registry.any((m) => merchantEq(m.merchant, mid))) {
-      flag = 'new-unit';
-    }
-    slot = MachineRow(
-        tid: tid, unit: name ?? '', merchant: mid ?? '', auto: true, flag: flag, unplaced: !firstScan);
-    registry.add(slot);
-    _dbg('NEW TERMINAL $tid -> ${name ?? '?'} merchant=${mid ?? '?'} (ماكينة ${registry.length}) flag=$flag');
-    if (flag.isNotEmpty) {
-      registryWarnings.add('ماكينة جديدة ${registry.length} ($tid): '
-          '${flag == 'new-unit' ? 'Merchant ID مش مطابق لأي وحدة - اتضافت كوحدة جديدة' : 'Merchant ID مش مقروء - مش معروف بتتبع أنهي وحدة'}');
-    }
-  }
-  if (name != null) slot.votes[name] = (slot.votes[name] ?? 0) + 1;
-  _learnedThisRun.add(tid);
-  rebuildFromRegistry();
-  saveRegistry();
-  return tid;
-}
-
-// الإيصال بيخزّن رقم الماكينة ورقم الوحدة وقت القراية، وأي تغيير بعد كده في السجل
-// (ماكينة اتحطت في النص، Merchant ID اتكمّل فوحدتين اتدمجوا، ترتيب اتغيّر من الشاشة) بيخلي الأرقام دي قديمة.
-// الدالة دي بترجّعها من السجل الحالي عن طريق الـ Terminal ID (هو الثابت).
-void refreshItemFromRegistry(ReceiptItem it) {
-  final t0 = it.tid;
-  if (t0 == null) return;
-  final info = terminals[tidAlias[t0] ?? t0];
-  if (info == null) return;
-  it.orderNum = info.orderNum;
-  it.row = info.excelRow;
-  it.unitName = info.unitName;
-}
-
-// الماكينة الجديدة (بعد أول فحص) بنفس الـ Merchant ID لوحدة موجودة: بتتحط تحت آخر ماكينة من الوحدة دي.
-// بتتنده بعد ما الباتشات تتقرا، لأن الصور اللي اتقرت قبلها شايلة رقم ماكينة ولو اتزحزح في النص هيبقى غلط.
-// بترجع true لو حركت أي ماكينة. بتنده rebuildFromRegistry وsaveRegistry بنفسها.
-bool regroupNewMachines() {
-  final pending = registry.where((m) => m.unplaced && m.auto).toList();
-  if (pending.isEmpty) {
-    for (final m in registry) {
-      m.unplaced = false;
-    }
-    return false;
-  }
-  final waiting = pending.toSet(); // لسه ما اتحطتش: ما تتحسبش ضمن "آخر ماكينة في الوحدة"
-  var moved = false;
-  for (final m in pending) {
-    waiting.remove(m);
-    m.unplaced = false;
-    if (m.merchant.isEmpty || m.reserved) continue;
-    var last = -1;
-    for (var i = 0; i < registry.length; i++) {
-      final x = registry[i];
-      if (identical(x, m) || waiting.contains(x)) continue;
-      if (merchantEq(x.merchant, m.merchant)) last = i;
-    }
-    if (last < 0) continue; // وحدة جديدة: تفضل في الآخر
-    final from = registry.indexOf(m);
-    if (from == last + 1) continue; // أصلاً في مكانها
-    registry.removeAt(from);
-    final at = from < last ? last : last + 1;
-    registry.insert(at, m);
-    moved = true;
-    registryWarnings.add('ماكينة ${m.tid} اتحطت رقم ${at + 1} جنب وحدتها (${m.unit}) - الأرقام اللي بعدها اتزحزحت');
-  }
-  for (final m in registry) {
-    m.unplaced = false;
-  }
-  rebuildFromRegistry();
-  saveRegistry();
-  return moved;
-}
-
-// بيبني الفهارس (رقم الماكينة -> TID ، رقم الصف -> اسم الوحدة) من الماكينات المحمّلة
-void rebuildTerminalIndexes() {
-  numToTid.clear();
-  rowNames.clear();
-  for (final e in terminals.entries) {
-    numToTid[e.value.orderNum] = e.key;
-    rowNames.putIfAbsent(e.value.excelRow, () => e.value.unitName);
+    _dbg('extra terminals save error: $e');
   }
 }
 
-List<int> machineNums() => numToTid.keys.toList()..sort();
-
-String machineLabel(int i) {
-  final t = terminals[numToTid[i]];
-  return 'ماكينة $i${t == null || t.unitName.isEmpty ? '' : ' - ${t.unitName}'}';
-}
-
-
-// السطور اللي فيها MERCHANT أو رقم طويل: بتتكتب في id_debug.txt لما الـ Merchant ID ما يتقراش
-String _merchSnippet(List<String> texts) {
-  final out = <String>[];
-  final re = RegExp(r'MERCH|\bMID\b|\d{10,}', caseSensitive: false);
-  for (final t in texts) {
-    for (final l in t.split('\n')) {
-      if (re.hasMatch(l)) out.add(l.trim());
-    }
-  }
-  final s = out.take(8).join(' | ');
-  return s.length > 400 ? s.substring(0, 400) : s;
-}
-
-// لو الـ MERCHANT ID ده متسجل قبل كده بنرجّع صف وحدته (تطابق كامل بس، من غير تقريب)
-int? _rowForMerchant(String mid) {
-  for (final e in merchantCodeMap.entries) {
-    if (merchantEq(e.key, mid)) return e.value;
-  }
-  return null;
-}
-
-// بتكمّل Merchant ID الناقص، وبتصوّت على الاسم (إلا لو انت قفلته). أي تعارض بيتسجل تنبيه بس، مش بيغيّر حاجة.
-void learnMerchant(String tid, List<String> texts) {
-  final m = machineByTid(tid);
-  if (m == null) return;
-  var ch = false;
-  final mid = extractMerchantId(texts);
-  if (mid == null && m.merchant.isEmpty) _dbg('NO MERCHANT $tid: ${_merchSnippet(texts)}');
-  if (mid != null) {
-    if (m.merchant.isEmpty && !m.lockMerch) {
-      m.merchant = mid;
-      if (m.flag == 'no-merchant') m.flag = '';
-      ch = true;
-    } else if (m.merchant.isNotEmpty && !merchantEq(m.merchant, mid)) {
-      final msg = 'ماكينة ${registry.indexOf(m) + 1} ($tid): الـ Merchant ID المقروء $mid مختلف عن المسجل ${m.merchant}';
-      if (!registryWarnings.contains(msg)) registryWarnings.add(msg);
-    }
-  }
-  if (!m.lockName) {
-    final nm = extractUnitName(texts);
-    if (nm != null) {
-      m.votes[nm] = (m.votes[nm] ?? 0) + 1;
-      final best = m.votes.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-      if (best != m.unit) {
-        m.unit = best;
-        ch = true;
-      }
-    }
-  }
-  if (ch) {
-    rebuildFromRegistry();
-    saveRegistry();
-  }
-}
-
-// ماكينة جديدة مكتوبة على الإيصال (Terminal ID) ومش في القايمة: بنسجّلها هي ووحدتها وبنحفظها في ملف الإعدادات
-// كل قراءات TERMINAL ID الموجودة في النص (مش أول واحدة بس)
-List<String> _tidLabeledAll(String t) {
-  final out = <String>[];
-  for (final m in RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,13}\d)", caseSensitive: false).allMatches(t)) {
-    final raw = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-    if (raw.length < 8 || raw.length > 9 || raw.startsWith('0011')) continue;
-    final d = raw.substring(raw.length - 8);
-    out.add(tidFix[d] ?? d);
-  }
-  return out;
-}
-
-// أرقام الترمنل في نفس البنك بتختلف أحياناً في رقم واحد بس (50382306 / 50382308)، فمينفعش نعتبر الفرق ده غلطة قراءة.
-// نعتبره غلطة بس لو اسم الوحدة المطبوع على الإيصال هو نفس وحدة الماكينة المعروفة.
-// بيرجّع: رقم الماكينة المعروفة (نفس الماكينة)، أو '?' (مش قادر أحدد)، أو '' (ماكينة مختلفة فعلاً)
-String _nearKnown(String tid, List<String> texts) {
-  String? near;
-  for (final k in terminals.keys) {
-    if (_digitDiff(k, tid) <= 1) {
-      near = k;
-      break;
-    }
-  }
-  if (near == null) return '';
-  final nm = extractUnitName(texts);
-  if (nm == null) return '?';
-  final r = _existingRowForName(nm);
-  if (r != null && r == terminals[near]!.excelRow) return near;
-  return '';
-}
-
-final Set<String> _learnedThisRun = <String>{}; // ماكينات اتسجلت في الفحص الحالي
-
-int _digitDiff(String a, String b) {
-  if (a.length != b.length) return 99;
-  var d = 0;
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) d++;
-  }
-  return d;
-}
-
-int? _existingRowForName(String name) {
-  final k = _normUnit(name);
-  for (final e in rowNames.entries) {
-    final o = _normUnit(e.value);
-    if (o == k) return e.key;
-    final mx = math.max(o.length, k.length);
-    if (mx >= 6 && _editDistance(o, k) <= (mx * 0.15).floor()) return e.key;
-  }
-  return null;
-}
-
-// تعلّم "حذر" من إيصالات الدفع: ماكينة جديدة بس لو رقمها اتقرا مرتين على الأقل، ووحدتها معروفة أصلاً
-// (من الباتشات أو من ملف الإعدادات)، ومش غلطة رقم واحد من ماكينة معروفة. غير كده بنسيبها من غير ما نخترع ماكينة.
-String? _discoverTerminalStrict(List<String> texts) {
+// ماكينة جديدة مكتوبة على الإيصال ومش في القايمة: بنربطها بالوحدة (من الـ Merchant ID أو اسم الوحدة)
+// ولو الوحدة مش معروفة منعملش حاجة (الإيصال بيروح للمراجعة زي الأول)
+String? discoverTerminal(List<String> texts) {
+  final row = findUnitExtraIn(texts);
+  if (row == null || !rowNames.containsKey(row)) return null;
   final counts = <String, int>{};
   for (final t in texts) {
-    for (final d in _tidLabeledAll(t)) {
-      counts[d] = (counts[d] ?? 0) + 1;
-    }
+    final d = _tidLabeledRaw(t);
+    if (d != null && RegExp(r'^50\d{6}$').hasMatch(d)) counts[d] = (counts[d] ?? 0) + 1;
   }
   if (counts.isEmpty) return null;
   final best = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
   final tid = best.key;
   if (terminals.containsKey(tid)) return tid;
-  final nk = _nearKnown(tid, texts);
-  if (nk == '?') return null;
-  if (nk.isNotEmpty) return nk;
-  if (best.value < 2) return null;
-  final mid = extractMerchantId(texts);
-  final uname = extractUnitName(texts);
-  final knownUnit = (mid != null && _rowForMerchant(mid) != null) ||
-      (uname != null && _existingRowForName(uname) != null);
-  if (!knownUnit && best.value < 5) return null;
-  return registerLearned(tid, uname, mid);
-}
-
-String? discoverTerminal(List<String> texts, {bool strict = false}) {
-  if (strict) return _discoverTerminalStrict(texts);
-  final counts = <String, int>{};
-  final midNow = extractMerchantId(texts);
-  bool inMerchant(String d) => midNow != null && midNow.contains(d);
-  for (final t in texts) {
-    final d = _tidLabeledRaw(t);
-    if (d != null && !inMerchant(d)) counts[d] = (counts[d] ?? 0) + 1;
-  }
-  if (counts.isEmpty) {
-    // لو الـ OCR لخبط ترتيب الأسطر: رقم من 8 أرقام واقف لوحده (مش تاريخ ولا جزء من MERCHANT ID)
-    for (final t in texts) {
-      for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(t)) {
-        final raw = m.group(1)!;
-        if (raw.startsWith('20') || raw.startsWith('19') || raw.startsWith('00')) continue;
-        final d = tidFix[raw] ?? raw;
-        if (!inMerchant(d)) counts[d] = (counts[d] ?? 0) + 1;
-      }
-    }
-  }
-  if (counts.isEmpty) return null;
-  // قراءتين مختلفتين بنفس القوة = مش متأكدين: الأفضل نسيبها للمراجعة بدل ما نسجّل ماكينة غلط
-  final ranked = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-  if (ranked.length > 1 && ranked[0].value == ranked[1].value && !terminals.containsKey(ranked[0].key) && !terminals.containsKey(ranked[1].key)) {
-    return null;
-  }
-  var tid = ranked.first.key;
-  if (terminals.containsKey(tid)) return tid;
-  final nk = _nearKnown(tid, texts);
-  if (nk == '?') return null;
-  if (nk.isNotEmpty) return nk;
-  final name = extractUnitName(texts);
-  final mid = extractMerchantId(texts);
-  return registerLearned(tid, name, mid);
-}
-
-
-// ملاحظات الماكينات اللي بتظهر تحت نتيجة الفحص: الماكينات اللي اتعلّمت، الباتشات اللي ماكينتها مجهولة، تنبيهات السجل،
-// ووحدات مش موجودة في قالب الإكسيل (صفوفه 2..11) علشان إجماليها ما يضيعش
-String _machineNote(List<ReceiptItem> items) {
-  final b = StringBuffer();
-  if (_learnedThisRun.isNotEmpty) {
-    final ms = terminals.entries.toList()..sort((a, c) => a.value.orderNum.compareTo(c.value.orderNum));
-    b.write('\n• الماكينات المسجلة (بترتيب الملف): ' +
-        ms.map((e) => '${e.value.orderNum}) ${e.value.unitName} ${e.key}').join(' ، ') +
-        '\n  (تقدر تعدّلها من: ⋮ ← إدارة الماكينات)');
-    final unresolved = items.where((e) => e.amount > 0 && e.orderNum == null).length;
-    if (unresolved > 0) {
-      b.write('\n⚠️ $unresolved باتش مقدرتش أعرف ماكينته (رقم الترمنل مش واضح). حدّد ماكينتهم من المراجعة وهتتسجل.');
-    }
-  }
-  if (registryWarnings.isNotEmpty) {
-    b.write('\n⚠️ تنبيهات الماكينات:\n• ${registryWarnings.join('\n• ')}');
-  }
-  final extra = <int, double>{};
-  for (final it in items) {
-    final r = it.row;
-    if (r != null && it.amount > 0 && (r < 2 || r > 11)) extra[r] = (extra[r] ?? 0.0) + it.amount;
-  }
-  if (extra.isNotEmpty) {
-    b.write('\n⚠️ وحدات مش موجودة في قالب الإكسيل (ضيفها يدوي): ' +
-        extra.entries.map((e) => '${rowNames[e.key] ?? 'وحدة ${e.key}'} = ${round2(e.value)}').join(' ، '));
-  }
-  return b.toString();
+  if (texts.length >= 2 && best.value < 2) return null; // أكتر من قراءة: لازم الرقم يتكرر مرتين
+  final order = machineCount + 1;
+  terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
+  numToTid[order] = tid;
+  _extraTids.add(tid);
+  _saveExtraTerminals();
+  _dbg('NEW TERMINAL $tid -> ${rowNames[row]} (ماكينة $order)');
+  return tid;
 }
 
 // ───────── الملفات الافتراضية: فولدر التطبيق + قالب الإكسيل (من الـ assets لو مش موجود) ─────────
@@ -3029,7 +2421,7 @@ Future<void> prepareDefaultFiles() async {
       await ensureDefaultFiles();
     }
   } catch (_) {}
-  await loadRegistry();
+  loadExtraTerminals();
 }
 
 Future<void> ensureDefaultFiles() async {
@@ -3548,11 +2940,6 @@ String? findTerminalFuzzyIn(List<String> texts, int? targetRow) {
 }
 
 int? findUnitExtraIn(List<String> texts) {
-  final fm = extractMerchantId(texts);
-  if (fm != null) {
-    final r0 = _rowForMerchant(fm);
-    if (r0 != null && rowNames.containsKey(r0)) return r0;
-  }
   for (final t in texts) {
     final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", caseSensitive: false)
         .firstMatch(t);
@@ -3561,12 +2948,10 @@ int? findUnitExtraIn(List<String> texts) {
       t.replaceAll(RegExp(r'\D'), ''),
     ];
     for (final d in cands) {
-      for (final e in merchantCodeMap.entries) {
-        if (e.key.length >= 6 && d.contains(e.key)) return e.value;
+      final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
+      if (mm != null && merchantCodeMap.containsKey(mm.group(1))) {
+        return merchantCodeMap[mm.group(1)];
       }
-      // الشكل القديم للوحدات الأصلية (11470XX084)
-      final lc = _legacyCode(d);
-      if (lc != null && rowNames.containsKey(lc - 20)) return lc - 20;
     }
   }
   for (final t in texts) {
@@ -3700,17 +3085,14 @@ Analysis analyzeLines(List<OcrLine> all) {
   int? row;
   String? name;
   if (tid == null) {
-    // الأول: رقم ترمنل مقروء بوضوح ومش معروف = ماكينة جديدة (التقريب بيلخبط ماكينات أرقامها قريبة)
-    final known0 = terminals.length;
-    tid = discoverTerminal(allTexts);
-    if (tid != null) how = terminals.length > known0 ? 'new-terminal' : 'fuzzy';
+    final u0 = findUnitExtraIn(allTexts);
+    tid = findTerminalFuzzyIn(allTexts, u0);
+    how = 'fuzzy';
     if (tid == null) {
-      final u0 = findUnitExtraIn(allTexts);
-      tid = findTerminalFuzzyIn(allTexts, u0);
-      how = 'fuzzy';
+      tid = discoverTerminal(allTexts); // ماكينة جديدة لوحدة معروفة
+      if (tid != null) how = 'new-terminal';
     }
   }
-  if (tid != null) learnMerchant(tid, allTexts);
   if (tid != null) {
     tid = tidAlias[tid] ?? tid;
     final info = terminals[tid]!;
@@ -3794,7 +3176,7 @@ Future<List<File>> extractPdfPages(File pdf) async {
 
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
-final String baseDir = '$root/A2R-POS';
+final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
 String outputDir = '$baseDir/output'; // ممكن المستخدم يغيّره من الشاشة
 final String defaultOutputDir = '$baseDir/output';
@@ -4508,6 +3890,114 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   return res;
 }
 
+// لو فوق أو تحت الباتش في الصورة كارت/شريط مكتوب فيه الاسم والتاريخ (منفصل عن الورقة بفاصل غامق): نوسّع القص ليشمله
+// (بنقرا الصورة الأصلية بس، ومبنكتبش أي حاجة جوه الملف). لو مفيش شريط بيرجّع نفس القص.
+// بيرجّع المسافة (نسبة من طول الورقة) اللي لازم نوسّع بيها، أو 0 لو مفيش شريط.
+double _captionExtent(img.Image im, List<double> q, bool top) {
+  try {
+    final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
+    final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
+    if (hq < 150 || wq < 60) return 0;
+    // الحافة اللي بندوّر بعدها (e1,e2) والحافة المقابلة لها (o1,o2)
+    final e1x = top ? q[0] : q[4], e1y = top ? q[1] : q[5];
+    final e2x = top ? q[2] : q[6], e2y = top ? q[3] : q[7];
+    final o1x = top ? q[4] : q[0], o1y = top ? q[5] : q[1];
+    final o2x = top ? q[6] : q[2], o2y = top ? q[7] : q[3];
+    const maxExt = 0.35;
+    const steps = 140;
+    const cols = 31;
+    final prof = <double>[];
+    var hitEdge = false;
+    for (var k = 0; k <= steps; k++) {
+      final t = maxExt * k / steps;
+      var sum = 0.0;
+      var n = 0;
+      var out = false;
+      for (var i = 0; i < cols; i++) {
+        final u = 0.15 + 0.7 * i / (cols - 1);
+        final ex = e1x * (1 - u) + e2x * u, ey = e1y * (1 - u) + e2y * u;
+        final ox = o1x * (1 - u) + o2x * u, oy = o1y * (1 - u) + o2y * u;
+        final x = ex + (ex - ox) * t, y = ey + (ey - oy) * t;
+        if (x < 2 || y < 2 || x > im.width - 3 || y > im.height - 3) {
+          out = true;
+          break;
+        }
+        final p = im.getPixel(x.round(), y.round());
+        sum += (p.r * 299 + p.g * 587 + p.b * 114) / 1000;
+        n++;
+      }
+      if (out) {
+        hitEdge = true;
+        break;
+      }
+      prof.add(sum / n);
+    }
+    if (prof.length < 10) return 0;
+    final lo = prof.reduce(math.min), hi = prof.reduce(math.max);
+    if (hi - lo < 50) return 0;
+    final mid = (lo + hi) / 2;
+    // ورقة (فاتح) -> فاصل غامق -> كارت فاتح -> غامق/نهاية الصورة
+    var k1 = 0;
+    while (k1 < prof.length && prof[k1] >= mid) k1++;
+    if (k1 >= prof.length) return 0;
+    var k2 = k1;
+    while (k2 < prof.length && prof[k2] < mid) k2++;
+    if (k2 >= prof.length) return 0;
+    const per = maxExt / steps;
+    // سطور الكتابة جوه الكارت (الاسم / التاريخ) متوسط سطوعها بيقل عن الحد فكانت بتتحسب نهاية الكارت:
+    // نعدّي أي فجوة غامقة قصيرة (أقل من ~3.5% من طول الورقة) لو بعدها فاتح تاني أو وصلنا لحافة الصورة
+    final tolDark = (0.035 / per).round();
+    var k3 = k2;
+    while (k3 < prof.length) {
+      if (prof[k3] >= mid) {
+        k3++;
+        continue;
+      }
+      var e = k3;
+      while (e < prof.length && prof[e] < mid) e++;
+      if (e - k3 <= tolDark && (e < prof.length || hitEdge)) {
+        k3 = e;
+        continue;
+      }
+      break;
+    }
+    if ((k2 - k1) * per > 0.10) return 0; // الفاصل كبير: مش كارت لازق في الباتش
+    if ((k3 - k2) * per < 0.03) return 0; // الشريط الفاتح قصير: مش كارت
+    if (k3 >= prof.length && !hitEdge) {
+      var minInside = 255.0;
+      for (var idx = k2; idx < prof.length; idx++) {
+        if (prof[idx] < minInside) minInside = prof[idx];
+      }
+      if (hi - minInside < 25) return 0; // خلفية سادة بدون كتابة
+    }
+    return per * (math.min(k3, prof.length) - 1) + 0.015;
+  } catch (_) {
+    return 0;
+  }
+}
+
+List<double> _extendForCaption(img.Image im, List<double> q) {
+  final tb = _captionExtent(im, q, false); // تحت
+  final tt = _captionExtent(im, q, true); // فوق
+  if (tb <= 0 && tt <= 0) return q;
+  final mx = (im.width - 1).toDouble(), my = (im.height - 1).toDouble();
+  final r = List<double>.from(q);
+  if (tt > 0) {
+    // الحافة العليا بتتحرك لفوق (بعيد عن الحافة السفلى)
+    r[0] = _cd(q[0] + (q[0] - q[4]) * tt, 0.0, mx);
+    r[1] = _cd(q[1] + (q[1] - q[5]) * tt, 0.0, my);
+    r[2] = _cd(q[2] + (q[2] - q[6]) * tt, 0.0, mx);
+    r[3] = _cd(q[3] + (q[3] - q[7]) * tt, 0.0, my);
+  }
+  if (tb > 0) {
+    r[4] = _cd(q[4] + (q[4] - q[0]) * tb, 0.0, mx);
+    r[5] = _cd(q[5] + (q[5] - q[1]) * tb, 0.0, my);
+    r[6] = _cd(q[6] + (q[6] - q[2]) * tb, 0.0, mx);
+    r[7] = _cd(q[7] + (q[7] - q[3]) * tb, 0.0, my);
+  }
+  return r;
+}
+
 // بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
 List<String> _scanToPages(String src, String base) {
   final cached = <String>[];
@@ -4526,7 +4016,8 @@ List<String> _scanToPages(String src, String base) {
       var quads = _detectReceipts(im);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-      for (final q in quads) {
+      for (final q0 in quads) {
+        final q = _extendForCaption(im, q0);
         final o = _warpAndEnhance(im, q);
         if (o == null) continue;
         final p = '${base}_${out.length}.jpg';
@@ -4548,13 +4039,12 @@ Future<List<String>> scanReceiptAsync(String src) async {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v2_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    final base = '$baseDir/.scans/v6_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
   }
 }
-
 
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
 Future<List<int>?> loadTemplateBytes() async {
@@ -4746,16 +4236,18 @@ class AutoLogEntry {
   final String text;
   final bool bad;
   final String? payload;
-  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload);
+  final String kind; // auto = فحص تلقائي | manual = فحص يدوي | chain = فحص شامل
+  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload, {this.kind = 'auto'});
   Map<String, dynamic> toJson() =>
-      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload};
+      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload, 'k': kind};
   static AutoLogEntry fromJson(Map<String, dynamic> j) => AutoLogEntry(
       DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
       (j['tab'] ?? 'home') as String,
       (j['title'] ?? '') as String,
       (j['text'] ?? '') as String,
       j['bad'] == true,
-      j['p'] as String?);
+      j['p'] as String?,
+      kind: (j['k'] ?? 'auto') as String);
 }
 
 final List<AutoLogEntry> autoLogG = <AutoLogEntry>[];
@@ -4784,16 +4276,37 @@ void _saveAutoLog() {
   } catch (_) {}
 }
 
-// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
-Future<void> postAutoNotify(
-    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+final ValueNotifier<int> autoLogTick = ValueNotifier<int>(0);
+
+void _addLog(String tab, String title, String text, bool bad, String? payload, String kind) {
   loadAutoLog();
-  final payload = openKey == null ? null : '$tab|$openKey';
-  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload));
-  while (autoLogG.length > 300) {
+  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload, kind: kind));
+  while (autoLogG.length > 3000) {
     autoLogG.removeLast();
   }
   _saveAutoLog();
+  autoLogTick.value++;
+}
+
+// بيسجّل في سجل الفحص من غير إشعار (الفحص اليدوي والشامل: بداية ونتيجة وإيقاف وأخطاء وكل ملف)
+void logScan({
+  required String tab,
+  required String title,
+  String text = '',
+  bool bad = false,
+  String kind = 'manual',
+  String? openKey,
+}) {
+  try {
+    _addLog(tab, title, text, bad, openKey == null ? null : '$tab|$openKey', kind);
+  } catch (_) {}
+}
+
+// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
+Future<void> postAutoNotify(
+    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+  final payload = openKey == null ? null : '$tab|$openKey';
+  _addLog(tab, title, text, bad, payload, 'auto');
   try {
     await _chan.invokeMethod('notify', {
       'title': tr(title),
@@ -4817,26 +4330,64 @@ class AutoLogPage extends StatefulWidget {
 
 class _AutoLogPageState extends State<AutoLogPage> {
   bool onlyBad = false;
+  String kindF = 'all'; // all | auto | manual | chain
+
+  static String _kindLabel(String k) => k == 'chain' ? 'فحص شامل' : (k == 'manual' ? 'يدوي' : 'تلقائي');
 
   @override
   void initState() {
     super.initState();
     loadAutoLog();
+    autoLogTick.addListener(_onTick);
   }
 
   static String _hm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    autoLogTick.removeListener(_onTick);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
     bool today(DateTime a) => a.year == now.year && a.month == now.month && a.day == now.day;
-    final list = autoLogG.where((e) => !onlyBad || e.bad).toList();
+    final list = autoLogG.where((e) => (!onlyBad || e.bad) && (kindF == 'all' || e.kind == kindF)).toList();
     final todayAll = autoLogG.where((e) => today(e.t)).toList();
     final todayBad = todayAll.where((e) => e.bad).length;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('سجل الفحص التلقائي'),
+        toolbarHeight: 54,
+        title: w.Text(tr('سجل الفحص')),
         actions: [
+          const HeaderButtons(),
+          IconButton(
+            tooltip: tr('مشاركة السجل'),
+            icon: const Icon(Icons.ios_share),
+            onPressed: () async {
+              final m = ScaffoldMessenger.of(context);
+              try {
+                final b = StringBuffer('===== سجل الفحص =====\n');
+                for (final e in autoLogG) {
+                  b.writeln('[${e.t.toIso8601String().substring(0, 19).replaceFirst('T', ' ')}] '
+                      '(${e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل'} / ${_kindLabel(e.kind)}) ${e.title}'
+                      '${e.text.isEmpty ? '' : '\n    ${e.text.replaceAll('\n', '\n    ')}'}');
+                }
+                final d = File('$baseDir/id_debug.txt');
+                if (d.existsSync()) b.write('\n===== تفاصيل فنية =====\n${d.readAsStringSync()}');
+                final out = File('$baseDir/scan_log.txt');
+                out.writeAsStringSync(b.toString());
+                await Share.shareXFiles([XFile(out.path, mimeType: 'text/plain')], text: 'سجل الفحص');
+              } catch (_) {
+                m.showSnackBar(const SnackBar(content: Text('مفيش سجل لسه. شغّل الفحص الأول.')));
+              }
+            },
+          ),
           IconButton(
             tooltip: tr('مسح السجل'),
             icon: const Icon(Icons.delete_outline),
@@ -4848,8 +4399,8 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       builder: (c) => AlertDialog(
                         title: const Text('مسح السجل؟'),
                         actions: [
-                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لأ')),
-                          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')),
+                          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
                         ],
                       ),
                     );
@@ -4868,7 +4419,7 @@ class _AutoLogPageState extends State<AutoLogPage> {
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
             child: Row(
               children: [
-                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} إشعار • $todayBad فيهم مشاكل'))),
+                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} سجل • $todayBad فيهم مشاكل'))),
                 FilterChip(
                   label: const Text('مشاكل بس'),
                   selected: onlyBad,
@@ -4877,9 +4428,26 @@ class _AutoLogPageState extends State<AutoLogPage> {
               ],
             ),
           ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                for (final k in const ['all', 'manual', 'auto', 'chain'])
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(end: 6),
+                    child: ChoiceChip(
+                      label: Text(k == 'all' ? 'الكل' : _kindLabel(k)),
+                      selected: kindF == k,
+                      onSelected: (_) => setState(() => kindF = k),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Expanded(
             child: list.isEmpty
-                ? const Center(child: Text('مفيش إشعارات لسه.'))
+                ? const Center(child: Text('مفيش سجلات لسه.'))
                 : ListView.separated(
                     itemCount: list.length,
                     separatorBuilder: (_, __) => const Divider(height: 1),
@@ -4887,11 +4455,16 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       final e = list[i];
                       final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
                       return ListTile(
-                        leading: Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
-                            color: e.bad ? Colors.orange : Colors.green),
+                        leading: e.title.startsWith('▶')
+                            ? Icon(Icons.play_circle_outline, color: Theme.of(context).colorScheme.onSurfaceVariant)
+                            : (e.title.startsWith('⏹')
+                                ? Icon(Icons.stop_circle_outlined, color: Theme.of(context).colorScheme.onSurfaceVariant)
+                                : Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
+                                    color: e.bad ? _tone(context, kReviewTone) : _tone(context, Colors.green))),
                         title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
-                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')}\n${tr(e.text)}'),
-                        isThreeLine: true,
+                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')} • ${tr(_kindLabel(e.kind))}'
+                            '${e.text.isEmpty ? '' : '\n${tr(e.text)}'}'),
+                        isThreeLine: e.text.isNotEmpty,
                         trailing: e.payload != null ? const Icon(Icons.chevron_left) : null,
                         onTap: e.payload == null
                             ? null
@@ -5008,19 +4581,58 @@ class ReceiptItem {
     this.missingBatchClosed = false,
   }) : batches = batches ?? <double>[];
 
+  Map<String, dynamic> toJson() => {
+        'path': path, 'tid': tid, 'on': orderNum, 'row': row, 'unit': unitName,
+        'amt': amount, 'date': date, 'key': key, 'ok': ok, 'how': how,
+        'bat': batches, 'sfx': suffix, 'otid': origTid, 'conf': conflict, 'skip': skip,
+        'alt': alt, 'dup': dupSuspect, 'ux': userExcluded, 'dd': dupDecision, 'dof': dupOf,
+        'unu': unusual, 'igd': ignoredDoc, 'ign': ign, 'dodd': dateOdd, 'dmain': dateMain,
+        'dfix': dateFix, 'txn': txn, 'rep': reprintSummary, 'nobc': missingBatchClosed,
+        'cands': cands,
+      };
+
+  static ReceiptItem fromJson(Map m) {
+    final it = ReceiptItem(
+      path: (m['path'] as String?) ?? '',
+      tid: m['tid'] as String?,
+      orderNum: (m['on'] as num?)?.toInt(),
+      row: (m['row'] as num?)?.toInt(),
+      unitName: m['unit'] as String?,
+      amount: ((m['amt'] as num?) ?? 0).toDouble(),
+      date: m['date'] as String?,
+      key: (m['key'] as String?) ?? '',
+      ok: m['ok'] == true,
+      how: (m['how'] as String?) ?? 'none',
+      batches: ((m['bat'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
+      suffix: (m['sfx'] as num?)?.toInt(),
+      origTid: m['otid'] as String?,
+      conflict: m['conf'] == true,
+      skip: m['skip'] == true,
+      alt: (m['alt'] as num?)?.toDouble(),
+      dupSuspect: m['dup'] == true,
+      userExcluded: m['ux'] == true,
+      dupDecision: m['dd'] as String?,
+      dupOf: (m['dof'] as num?)?.toInt(),
+      ignoredDoc: m['igd'] == true,
+      ign: m['ign'] as String?,
+      dateOdd: m['dodd'] == true,
+      reprintSummary: m['rep'] == true,
+      missingBatchClosed: m['nobc'] == true,
+    );
+    it.unusual = m['unu'] as String?;
+    it.dateMain = m['dmain'] as String?;
+    it.dateFix = m['dfix'] as String?;
+    it.txn = (m['txn'] as num?)?.toInt();
+    it.cands = ((m['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList();
+    return it;
+  }
+
   // داخل في الإجماليات والـ PDF؟
   bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
 
   // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
-  bool get weakId {
-    if (how == 'new-terminal') {
-      // Terminal ID اتقرا واضح: مش محتاج تأكيد إلا لو السجل شاكك في الماكينة (Merchant ID مش مطابق / مش مقروء)
-      final t = tid;
-      final mr = t == null ? null : machineByTid(t);
-      return mr == null || mr.flag.isNotEmpty;
-    }
-    return !(how == 'terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
-  }
+  bool get weakId =>
+      !(how == 'terminal' || how == 'new-terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
 
   bool get needsReview =>
       ignoredDoc ||
@@ -5035,6 +4647,56 @@ class ReceiptItem {
               alt != null ||
               unusual != null ||
               weakId));
+}
+
+// ───────────────────── نتايج قايمة التقفيل (بتفضل محفوظة حتى لو قفلت التطبيق) ─────────────────────
+final String closingStatePath = '$baseDir/.app_closing.json';
+
+// لو true: الإكسيل / الـ PDF مش بيتعملوا لحد ما كل الإيصالات اللي محتاجة مراجعة (باتش غلط، ماكينة أو مبلغ
+// مش متحدد، مشكوك فيه...) تتصحح. غيّر أي واحدة لـ false لو عايز الملف ده يتعمل في كل الأحوال.
+const bool kHoldExcelUntilReviewed = true;
+const bool kHoldPdfUntilReviewed = true;
+
+void saveClosingState({
+  required List<ReceiptItem> items,
+  required List<SysTotal> sys,
+  required List<int> missing,
+  required List<String> warnings,
+  required List<String> excludedPay,
+  required String sourceNote,
+}) {
+  try {
+    if (items.isEmpty && sys.isEmpty) return; // ما نمسحش آخر نتيجة محفوظة بقايمة فاضية
+    final tmp = File('$closingStatePath.tmp')..createSync(recursive: true);
+    tmp.writeAsStringSync(jsonEncode({
+      'v': 1,
+      'items': items.map((e) => e.toJson()).toList(),
+      'sys': sys.map((e) => e.toJson()).toList(),
+      'missing': missing,
+      'warnings': warnings,
+      'excludedPay': excludedPay,
+      'sourceNote': sourceNote,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    }));
+    tmp.renameSync(closingStatePath); // كتابة آمنة: لو التطبيق اتقفل في النص الملف القديم يفضل سليم
+  } catch (_) {}
+}
+
+Map<String, dynamic>? loadClosingState() {
+  try {
+    final f = File(closingStatePath);
+    if (!f.existsSync()) return null;
+    return Map<String, dynamic>.from(jsonDecode(f.readAsStringSync()) as Map);
+  } catch (_) {
+    return null;
+  }
+}
+
+void deleteClosingState() {
+  try {
+    final f = File(closingStatePath);
+    if (f.existsSync()) f.deleteSync();
+  } catch (_) {}
 }
 
 // ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
@@ -5157,16 +4819,6 @@ void checkUnusual(List<ReceiptItem> items, String reportDate) {
   } catch (_) {}
 }
 
-
-// ───────── العد السريع: صور الصفحات الأصلية (JPEG) من الـ PDF الممسوح + عدّ بالهيكل ─────────
-bool _loadFast() {
-  try {
-    return _readCfg()['fastCount'] != false;
-  } catch (_) {
-    return true;
-  }
-}
-
 // ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
 const int _kParWorkers = 2;
 
@@ -5205,21 +4857,21 @@ void setCountEngine(int e) {
 }
 
 // الطريقة اللي منها العدد المعروض: 3 = تسلسل رأسي (الأساسية) • 2 = علامات الدفع بس • 1 = أكبر علامة
-int countMethod = _loadIntCfg('countMethod', 3, 1, 3);
+int countMethod = _loadIntCfg('countMethod', 1, 1, 3);
 void setCountMethod(int m) {
   countMethod = m;
   _saveCfgKey('countMethod', m);
 }
 
 // إعادة فحص الصفحات المشكوك فيها (إزالة الخط الأحمر + عدّ المستطيلات)
-bool redFixCount = _loadBoolCfg('redFixCount', true);
+bool redFixCount = _loadBoolCfg('redFixCount', false);
 void setRedFixCount(bool v) {
   redFixCount = v;
   _saveCfgKey('redFixCount', v);
 }
 
 // حماية الزيادة: صفحة كاملة (مش آخر صفحة) عددها أكتر من باقي الصفحات بواحد والعلامات متفقة على العدد الأقل = الزيادة قراءة مكررة
-bool consensusGuard = _loadBoolCfg('consensusGuard', true);
+bool consensusGuard = _loadBoolCfg('consensusGuard', false);
 void setConsensusGuard(bool v) {
   consensusGuard = v;
   _saveCfgKey('consensusGuard', v);
@@ -5227,9 +4879,9 @@ void setConsensusGuard(bool v) {
 
 void resetCountDefaults() {
   setCountEngine(0);
-  setCountMethod(3);
-  setRedFixCount(true);
-  setConsensusGuard(true);
+  setCountMethod(1);
+  setRedFixCount(false);
+  setConsensusGuard(false);
   dualCount = false;
   _saveCfgKey('dualCount', false);
 }
@@ -5242,29 +4894,8 @@ bool _loadDual() {
   }
 }
 
-// ⚡ العد المتوازي: الديفولت شغال (الأسرع). مستقل تماماً عن التدقيق المزدوج.
-bool _loadPar() {
-  try {
-    return _readCfg()['parallelCount'] != false;
-  } catch (_) {
-    return true;
-  }
-}
-
-
-
 // التدقيق المزدوج (اختياري، أبطأ شوية): قراءة تانية بصورة محسّنة لآخر صفحة في كل ملف (والصفحات المشكوك فيها)
 bool dualCount = _loadDual();
-
-void toggleDualCount() {
-  dualCount = !dualCount;
-  try {
-    final m = _readCfg();
-    m['dualCount'] = dualCount;
-    _writeCfg(m);
-  } catch (_) {}
-}
-
 
 // ⚠️ لازم تتنده من دالة top-level: لو Isolate.run اتكتبت جوه ميثود في الـ State، الـ closure بتشيل معاها
 // الـ context كله (MResult + TextEditingController...) فالإرسال بيفشل والعد السريع بيقع على الطريقة البطيئة.
@@ -5876,7 +5507,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? customOut;
   bool busy = false;
   double progress = 0;
-  String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
+  String status = 'اضغط "فحص التقفيل" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
   final List<SysTotal> sysReads = []; // صور السيستم اللي اتقرت
   String? standardXlsxPath;
@@ -5897,6 +5528,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _autoTimer;
   Set<String> _quickPend = <String>{}; // ملفات جديدة لسه حجمها بيتغير (التنزيل ما خلصش)
   bool _fullRunning = false; // فحص يدوي كامل شغال أو بيبدأ: الفحص الخفيف يستنى
+  bool reviewHold = false; // الإكسيل/الـ PDF متوقفين لحد ما تخلّص مراجعة الإيصالات
+
+  void _saveClosing({bool force = false}) {
+    if (busy && !force) return;
+    saveClosingState(
+      items: processedItems,
+      sys: sysReads,
+      missing: missingTerminals,
+      warnings: warnings,
+      excludedPay: excludedPay,
+      sourceNote: sourceNote,
+    );
+  }
+
+  // رجوع نتايج آخر فحص بعد فتح التطبيق من جديد (الصور اللي اتمسحت من الجهاز بتتشال)
+  void _restoreClosing() {
+    try {
+      if (processedItems.isNotEmpty || sysReads.isNotEmpty) return;
+      final m = loadClosingState();
+      if (m == null) return;
+      final its = <ReceiptItem>[];
+      for (final e in (m['items'] as List? ?? const [])) {
+        if (e is! Map) continue;
+        final it = ReceiptItem.fromJson(e);
+        if (it.path.isEmpty || !File(it.path).existsSync()) continue;
+        its.add(it);
+      }
+      final sys = <SysTotal>[
+        for (final e in (m['sys'] as List? ?? const []))
+          if (e is Map) SysTotal.fromJson(e)
+      ];
+      if (its.isEmpty && sys.isEmpty) return;
+      processedItems.addAll(its);
+      sysReads.addAll(sys);
+      missingTerminals = [for (final e in (m['missing'] as List? ?? const [])) (e as num).toInt()];
+      warnings.addAll([for (final e in (m['warnings'] as List? ?? const [])) e.toString()]);
+      excludedPay.addAll([for (final e in (m['excludedPay'] as List? ?? const [])) e.toString()]);
+      sourceNote = (m['sourceNote'] as String?) ?? '';
+      reviewHold = (kHoldExcelUntilReviewed || kHoldPdfUntilReviewed) && its.any((e) => e.needsReview);
+      status = 'رجّعت نتايج آخر فحص: ${_countLine()}'
+          '${reviewHold ? '\n⏸️ الإكسيل والـ PDF هيتعملوا أول ما تخلّص مراجعة الإيصالات اللي عليها علامة ⚠️.' : ''}';
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -5917,15 +5591,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
-    registryRev.addListener(_onRegistry);
+    settingsResetSignal.addListener(_onSettingsReset);
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
+    _restoreClosing();
   }
 
   void _syncDays() {
     if (!mounted || busy || days == sharedDays.value) return;
     setState(() => days = sharedDays.value);
+  }
+
+  // "رجّع كل الإعدادات للافتراضي": الفولدرات والفترة والفحص التلقائي والصور المقلوبة
+  void _onSettingsReset() {
+    if (!mounted) return;
+    if (autoScan) _setAuto(false);
+    setState(() {
+      customDir = null;
+      customOut = null;
+      outputDir = defaultOutputDir;
+      autoRotate = false;
+      days = 0;
+    });
   }
 
   void _onWipe() {
@@ -5940,8 +5628,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       generatedPdfPath = null;
       extraPdfPaths = [];
       reviewOnly = false;
+      reviewHold = false;
       sourceNote = '';
-      status = 'تم مسح كل حاجة. اضغط "بدء المعالجة الشاملة" لبدء يوم جديد.';
+      deleteClosingState();
+      status = 'تم مسح كل حاجة. اضغط "فحص التقفيل" لبدء يوم جديد.';
     });
   }
 
@@ -5998,6 +5688,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } else {
         it.userExcluded = true;
         it.ok = false;
+        if (it.ignoredDoc) {
+          // سحب صورة متجاهلة لـ "غلط" = تجاهلها نهائي (علشان ما تفضلش مانعة الإكسيل)
+          it.ignoredDoc = false;
+          it.ign = 'drop';
+        }
         saveFix(it);
         await _refresh();
       }
@@ -6041,6 +5736,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+    // التطبيق رايح للخلفية / بيتقفل: نحفظ نتايج التقفيل الحالية
+    if (state != AppLifecycleState.resumed) _saveClosing();
     // رجعت للتطبيق: نعرض هل المراقبة كانت شغالة وانت برا (تشخيص)
     if (state == AppLifecycleState.resumed && autoScan && !busy && _lastTickAt != null && mounted) {
       final ago = DateTime.now().difference(_lastTickAt!).inSeconds;
@@ -6059,18 +5756,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     openReqG.removeListener(_onOpenReqHome);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
-    registryRev.removeListener(_onRegistry);
+    settingsResetSignal.removeListener(_onSettingsReset);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
-  }
-
-  // اتعدّلت الماكينات من الشاشة: نحدّث أرقام الإيصالات ونعيد بناء الإكسيل والـ PDF بالترتيب الجديد
-  void _onRegistry() {
-    if (!mounted || busy || processedItems.isEmpty) return;
-    for (final r in processedItems) {
-      refreshItemFromRegistry(r);
-    }
-    rebuildFiles();
   }
 
   void _onOpenReqHome() {
@@ -6258,7 +5946,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final sy in sysReads) {
         if (!newNames.contains(sy.file)) continue;
         final t = sy.tid != null ? terminals[sy.tid] : null;
-        final label = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
+        final label = t != null ? machineLabel(t.orderNum, t.unitName) : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
         if (sy.amount == null) {
           lines.add('⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - راجعها');
           continue;
@@ -6297,7 +5985,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final name = baseName(it.path);
     if (it.ignoredDoc) return '⚠️ $name: شكله إيصال دفع/مستند مش باتش - راجعه';
     final label = it.orderNum != null
-        ? 'ماكينة ${it.orderNum}${it.suffix != null ? ' (باتش ${it.suffix})' : ''}${it.unitName != null ? ' - ${it.unitName}' : ''}'
+        ? '${machineLabel(it.orderNum, it.unitName)}${it.suffix != null ? ' (باتش ${it.suffix})' : ''}'
         : (it.unitName ?? name);
     final why = <String>[];
     if (it.reprintSummary) why.add('REPRINT/SUMMARY (إعادة طباعة/ملخص)');
@@ -6383,11 +6071,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final rv = processedItems.where((e) => e.needsReview).length;
     return Row(
       children: [
-        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue, compact: true),
-        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green, compact: true),
+        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blueGrey, compact: true),
+        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.blueGrey, compact: true),
         _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
             compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
-        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange,
+        _statCard(Icons.fact_check, 'مراجعة', '$rv', kReviewTone,
             compact: true, onTap: rv == 0 ? null : openReview),
       ],
     );
@@ -6487,7 +6175,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final files = <XFile>[if (x != null) XFile(x), if (p != null) XFile(p)];
     if (files.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+        SnackBar(
+            content: Text(reviewHold
+                ? 'خلّص مراجعة الإيصالات اللي عليها ⚠️ الأول، وبعدها الإكسيل والـ PDF هيتعملوا.'
+                : 'لم يتم إنشاء ملفات بعد لمشاركتها.')),
       );
       return;
     }
@@ -6500,6 +6191,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // أحدث ملف إخراج (إكسيل/PDF): من آخر معالجة، أو آخر ملف "الاسكندريه ..." في فولدر الإخراج
   String? latestOutput(String ext) {
+    // لسه فيه إيصالات محتاجة مراجعة: ما نعرضش ملف قديم ممكن يكون إجمالياته غلط
+    if (reviewHold && (ext == '.xlsx' ? kHoldExcelUntilReviewed : kHoldPdfUntilReviewed)) return null;
     final cur = ext == '.xlsx' ? standardXlsxPath : generatedPdfPath;
     if (cur != null && File(cur).existsSync()) return cur;
     try {
@@ -6607,6 +6300,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Directory('$baseDir/.scans').deleteSync(recursive: true);
     } catch (_) {}
     await clearScanCache();
+    deleteClosingState();
     setState(() {
       processedItems.clear();
       sysReads.clear();
@@ -6615,6 +6309,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       standardXlsxPath = null;
       generatedPdfPath = null;
       extraPdfPaths = [];
+      reviewHold = false;
       status = 'تم مسح $n ملف.';
     });
   }
@@ -6655,7 +6350,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final changed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => ReviewPage(items: list, allItems: processedItems, single: true, initialIndex: at),
+        builder: (_) => ReviewPage(
+            items: list, allItems: processedItems, single: true, initialIndex: at, sysLineOf: _sysLineOf),
       ),
     );
     if (changed == true) {
@@ -6663,6 +6359,84 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else if (mounted) {
       setState(() {});
     }
+  }
+
+  // إعادة قراءة الترمنل يدوي (من قايمة التلات نقط): بيجرّب الصورة زي ما هي، محسّنة، ومدوّرة
+  // الاتجاهات الأربعة. لو لقى ترمنل معروف بيثبّته للباتش ويدوّر الصورة لو لزم.
+  Future<void> reReadTerminal(ReceiptItem item) async {
+    if (busy) return;
+    final msg = ScaffoldMessenger.of(context);
+    msg.hideCurrentSnackBar();
+    msg.showSnackBar(SnackBar(
+        duration: const Duration(seconds: 30),
+        content: w.Text(_l(context, 'بعيد قراءة الترمنل...', 'Re-reading terminal...'))));
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    Analysis? found;
+    var foundDeg = 0;
+    try {
+      Directory(tmpDir).createSync(recursive: true);
+      for (final deg in const [0, 90, 270, 180]) {
+        for (final enhance in const [false, true]) {
+          final tp = '$tmpDir/retid_$deg.jpg';
+          try {
+            if (!await fixImageAsync(item.path, tp, deg)) continue;
+            var rp = tp;
+            if (enhance) {
+              rp = '$tmpDir/retid_${deg}_enh.jpg';
+              await enhanceImageAsync(tp, rp);
+            }
+            final res = await recognizer.processImage(InputImage.fromFilePath(rp));
+            final a = analyzeLines(toLines(res));
+            if (a.tid == null || a.how == 'name/merchant' || terminals[a.tid] == null) continue;
+            // لازم نفس الوحدة اللي التطبيق حدّدها قبل كده (لو كانت متحددة)
+            if (item.row != null && terminals[a.tid]!.excelRow != item.row) continue;
+            found = a;
+            foundDeg = deg;
+            break;
+          } catch (_) {}
+        }
+        if (found != null) break;
+      }
+    } finally {
+      await recognizer.close();
+    }
+    if (!mounted) return;
+    msg.hideCurrentSnackBar();
+    final f = found;
+    if (f == null) {
+      msg.showSnackBar(SnackBar(
+          content: w.Text(_l(context, 'مقدرتش أقرا الترمنل. افتح الباتش واختار الماكينة يدوي.',
+              'Could not read the terminal. Open the batch and pick the machine manually.'))));
+      return;
+    }
+    final info = terminals[f.tid]!;
+    final clash = processedItems.any((x) =>
+        x != item && x.counts && x.suffix == null && x.tid == f.tid && x.orderNum == info.orderNum);
+    if (clash) {
+      msg.showSnackBar(SnackBar(
+          content: w.Text(_l(
+              context,
+              'الترمنل ${f.tid} (ماكينة ${info.orderNum}) اتقرا، بس ماكينة ${info.orderNum} موجودة في إيصال تاني. افتح الباتش وراجعه.',
+              'Terminal ${f.tid} (machine ${info.orderNum}) was read, but that machine is already used by another receipt. Open the batch to review.'))));
+      return;
+    }
+    if (foundDeg != 0) {
+      try {
+        await fixImageAsync(item.path, item.path, foundDeg);
+        await FileImage(File(item.path)).evict();
+        imageCache.clear();
+      } catch (_) {}
+    }
+    item.tid = f.tid;
+    item.orderNum = info.orderNum;
+    item.row = info.excelRow;
+    item.unitName = info.unitName;
+    item.how = 'terminal';
+    saveFix(item);
+    msg.showSnackBar(SnackBar(
+        content: w.Text(_l(context, '✅ الترمنل ${f.tid} - ماكينة ${info.orderNum} (${info.unitName})',
+            '✅ Terminal ${f.tid} - machine ${info.orderNum} (${info.unitName})'))));
+    await _refresh();
   }
 
   void useWhatsApp() {
@@ -6684,110 +6458,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (moved[generatedPdfPath] != null) generatedPdfPath = moved[generatedPdfPath];
       extraPdfPaths = extraPdfPaths.map((p) => moved[p] ?? p).toList();
     });
-  }
-
-  Future<void> shareStandardFiles() async {
-    final files = <XFile>[];
-    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
-      files.add(XFile(standardXlsxPath!));
-    }
-    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
-      files.add(XFile(generatedPdfPath!));
-    }
-    for (final p in extraPdfPaths) {
-      if (File(p).existsSync()) files.add(XFile(p));
-    }
-    if (files.isNotEmpty) {
-      if (!await confirmSend(context,
-          review: processedItems.where((e) => e.needsReview).length, missing: missingTerminals.length)) {
-        return;
-      }
-      await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
-      );
-    }
-  }
-
-  Future<void> shareAdvancedFile() async {
-    final files = <XFile>[];
-    for (final p in ['$outputDir/review_report.txt', '$outputDir/ocr_debug.txt']) {
-      if (File(p).existsSync()) files.add(XFile(p));
-    }
-    if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'لوج التقفيل (تقرير المراجعة + OCR)');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ملفات المراجعة غير متاحة حالياً.')),
-      );
-    }
-  }
-
-  Future<void> editReceiptDialog(ReceiptItem item) async {
-    final amtController = TextEditingController(text: item.amount.toStringAsFixed(2));
-    int? selectedOrder = item.orderNum;
-
-    await showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlgState) => AlertDialog(
-          title: const Text('تعديل بيانات الإيصال'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: amtController,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: InputDecoration(labelText: tr('المبلغ الإجمالي')),
-                ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  value: selectedOrder,
-                  hint: const Text('اختر الماكينة'),
-                  items: [
-                    for (final i in machineNums())
-                      DropdownMenuItem(
-                        value: i,
-                        child: Text(machineLabel(i)),
-                      ),
-                  ],
-                  onChanged: (v) => setDlgState(() => selectedOrder = v),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-            FilledButton(
-              onPressed: () {
-                final newAmt = double.tryParse(amtController.text) ?? item.amount;
-                setState(() {
-                  item.amount = round2(newAmt);
-                  item.batches = [item.amount];
-                  item.ok = true;
-                  item.alt = null;
-                  item.how = 'manual';
-                  if (selectedOrder != null) {
-                    item.orderNum = selectedOrder;
-                    item.tid = numToTid[selectedOrder];
-                    item.row = terminals[item.tid]!.excelRow;
-                    item.unitName = terminals[item.tid]!.unitName;
-                  }
-                });
-                saveFix(item);
-                Navigator.pop(ctx);
-                rebuildFiles();
-              },
-              child: const Text('حفظ وتحديث الملفات'),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   // ملخص العد (زي رسالة "اكتمل العد" في إيصالات الدفع): صور، اتسمّى، إجمالي
@@ -6857,14 +6527,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     await Share.shareXFiles([XFile(item.path)],
-        text: item.orderNum != null ? 'ماكينة ${item.orderNum}' : baseName(item.path));
+        text: item.orderNum != null ? machineLabel(item.orderNum, item.unitName) : baseName(item.path));
   }
 
   Future<void> rebuildFiles({bool lite = false}) async {
     setState(() => status = lite ? 'جاري تحديث النتائج (فحص خفيف)...' : 'جاري توليد الملفات وتحديث الشيتات...');
-    for (final r in processedItems) {
-      refreshItemFromRegistry(r); // الإجماليات بتتجمّع بالوحدة: لازم رقم الوحدة يبقى من السجل الحالي
-    }
     final dateCounts = <String, int>{};
     for (final r in processedItems) {
       if (r.date != null) {
@@ -6901,16 +6568,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
       final foundL = mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
       missingTerminals = [
-        for (final i in expectedMachineNums())
+        for (var i = 1; i <= kMainMachines; i++)
           if (!foundL.contains(i) && !ignoreL.contains(i)) i
       ];
       writeReport(reportDate);
+      reviewHold = processedItems.any((e) => e.needsReview) && (kHoldExcelUntilReviewed || kHoldPdfUntilReviewed);
+      _saveClosing(force: true);
       setState(() => status = 'تم فحص خفيف: ${_countLine()}\n'
           '• من غير بناء الإكسيل والـ PDF (اضغط "فحص التقفيل" لبنائهم).' +
-          (sourceNote.isEmpty ? '' : '\n$sourceNote') +
-          _machineNote(mainItems));
+          (sourceNote.isEmpty ? '' : '\n$sourceNote'));
       return;
     }
+    // الإكسيل والـ PDF مبيتعملوش لحد ما كل الإيصالات اللي محتاجة مراجعة تتصحح
+    // (باتش غلط / ماكينة أو مبلغ مش متحدد / مكرر مشكوك فيه / تاريخ مختلف...)
+    final pendingRv = processedItems.where((e) => e.needsReview).toList();
+    final holdXlsx = kHoldExcelUntilReviewed && pendingRv.isNotEmpty;
+    final holdPdf = kHoldPdfUntilReviewed && pendingRv.isNotEmpty;
+    reviewHold = holdXlsx || holdPdf;
     var pageNo = 0;
     Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
       final pdf = pw.Document();
@@ -6925,6 +6599,53 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
+        // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
+        if (srcs.length > 1) {
+          try {
+            final ims = <pw.MemoryImage>[];
+            final dims = <List<int>>[];
+            for (final p in srcs) {
+              final b = File(p).readAsBytesSync();
+              final d = _jpegSize(b);
+              if (d == null) throw Exception('not jpeg');
+              ims.add(pw.MemoryImage(b));
+              dims.add(d);
+            }
+            const mg = 6.0, gap = 8.0;
+            final n = ims.length;
+            final pageW = 420.0 + 140.0 * (n - 1);
+            final contentW = pageW - 2 * mg - gap * (n - 1);
+            final sumW = dims.fold<int>(0, (a, d) => a + d[0]);
+            final k = contentW / sumW;
+            final maxH = dims.map((d) => d[1] * k).reduce((a, b) => a > b ? a : b);
+            pdf.addPage(
+              pw.Page(
+                pageFormat: PdfPageFormat(pageW, maxH + 2 * mg),
+                margin: const pw.EdgeInsets.all(mg),
+                build: (pw.Context ctx) => pw.Directionality(
+                  textDirection: pw.TextDirection.ltr,
+                  child: pw.Row(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      for (var i = 0; i < n; i++) ...[
+                        if (i > 0) pw.SizedBox(width: gap),
+                        pw.SizedBox(
+                          width: dims[i][0] * k,
+                          height: dims[i][1] * k,
+                          child: pw.Image(ims[i], fit: pw.BoxFit.fill),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            );
+            pages++;
+            continue;
+          } catch (_) {
+            // لو فشل التركيب نرجع للطريقة القديمة: صفحة لكل باتش
+          }
+        }
         for (final p in srcs) {
           try {
             final bytes = File(p).readAsBytesSync();
@@ -6962,21 +6683,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
-    await buildPdf(mainItems, pdfOutFile);
-    generatedPdfPath = pdfOutFile.path;
     extraPdfPaths = [];
-    for (final e in otherByDate.entries) {
-      final f = File('$outputDir/الاسكندريه ${e.key}.pdf');
-      if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
+    if (holdPdf) {
+      generatedPdfPath = null;
+    } else {
+      await buildPdf(mainItems, pdfOutFile);
+      generatedPdfPath = pdfOutFile.path;
+      for (final e in otherByDate.entries) {
+        final f = File('$outputDir/الاسكندريه ${e.key}.pdf');
+        if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
+      }
     }
 
     // حساب إجماليات كل وحدة
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
-    }
-    for (final r in rowNames.keys) {
-      unitTotals.putIfAbsent(r, () => 0.0);
     }
     // عدد الأجهزة الفعلي لكل وحدة: كل جهاز بيتعدّ مرة واحدة حتى لو عمل أكتر من باتش في اليوم
     final unitDevices = <int, Set<String>>{};
@@ -6993,8 +6715,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود C (عدد الأجهزة) و D (مبلغ كل وحدة) و F (الإجمالي)
     var xlsxLine = '• تم توليد الإكسيل: الاسكندريه $reportDate.xlsx';
     standardXlsxPath = null;
-    final tpl = await loadTemplateBytes();
-    if (tpl == null) {
+    final tpl = holdXlsx ? null : await loadTemplateBytes();
+    if (holdXlsx) {
+      xlsxLine = '• ⏸️ الإكسيل لسه ما اتعملش.';
+    } else if (tpl == null) {
       xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all (ولا مضاف للتطبيق)، فمتعملش إكسيل.';
     } else {
       try {
@@ -7017,19 +6741,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final foundOrders =
         mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [
-      for (final i in expectedMachineNums())
+      for (var i = 1; i <= kMainMachines; i++)
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
     ];
     writeReport(reportDate);
+    _saveClosing(force: true);
+
+    final noMachine = pendingRv.where((e) => !e.ignoredDoc && (e.row == null || e.orderNum == null)).length;
+    final noAmount = pendingRv.where((e) => !e.ignoredDoc && e.amount <= 0).length;
+    final holdLine = (holdXlsx || holdPdf)
+        ? '\n⏸️ لسه ${pendingRv.length} إيصال محتاج مراجعة'
+            '${noMachine > 0 ? ' ($noMachine من غير ماكينة محددة)' : ''}'
+            '${noAmount > 0 ? ' ($noAmount من غير مبلغ مقروء)' : ''}'
+            ' - الإكسيل والـ PDF هيتعملوا تلقائي أول ما تخلّصهم.'
+        : '';
 
     setState(() => status = 'اكتمل العد: ${_countLine()}\n'
         '$xlsxLine\n'
-        '• تم توليد ملف الـ PDF المجمع.' +
+        '${holdPdf ? '• ⏸️ الـ PDF لسه ما اتعملش.' : '• تم توليد ملف الـ PDF المجمع.'}$holdLine' +
         (extraPdfPaths.isEmpty
             ? ''
             : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
-        (sourceNote.isEmpty ? '' : '\n$sourceNote') +
-        _machineNote(mainItems));
+        (sourceNote.isEmpty ? '' : '\n$sourceNote'));
   }
 
   // مبلغ السيستم الخاص بترمنل الباتش ده (أحدث صورة لنفس الترمنل وتاريخ الباتش)
@@ -7062,42 +6795,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     if (mounted) setState(() {});
-  }
-
-  Widget _sysCard(BuildContext context) {
-    final best = <String, SysTotal>{};
-    for (final s in sysReads) {
-      if (s.tid == null || s.amount == null) continue;
-      final k = '${s.tid}|${s.date ?? ''}';
-      final p = best[k];
-      if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
-    }
-    if (best.isEmpty) return const SizedBox.shrink();
-    final list = best.values.toList()
-      ..sort((a, b) => (terminals[a.tid]?.orderNum ?? 999).compareTo(terminals[b.tid]?.orderNum ?? 999));
-    final lines = <String>[];
-    for (final s in list) {
-      final t = terminals[s.tid];
-      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
-      lines.add('$nm: ${_fmtMoney(s.amount!)} ج.م${s.date != null ? ' (${s.date})' : ''}');
-    }
-    return Container(
-      margin: const EdgeInsets.only(top: 6),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: _tintBg(context, Colors.blue, soft: true),
-        border: Border.all(color: _tintBorder(context, Colors.blue)),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('🖥️ مبالغ السيستم (${list.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          Text(lines.join('\n'), style: const TextStyle(fontSize: 12)),
-        ],
-      ),
-    );
   }
 
   // فرق مبلغ السيستم عن مجموع باتشات نفس الماكينة (null = مفيش صورة سيستم). مقياس بس
@@ -7153,8 +6850,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         spacing: 6,
         runSpacing: 4,
         children: [
-          if (nm > 0) chip(_l(context, '⚠️ ناقص $nm', '⚠️ Missing $nm'), Colors.amber),
-          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), Colors.orange),
+          if (nm > 0)
+            InkWell(
+              onTap: openClosingReport,
+              borderRadius: BorderRadius.circular(12),
+              child: _flagChip(
+                  context,
+                  '⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} ($nm): '
+                  '${missingTerminals.map((n) {
+                    final t = numToTid[n] != null ? terminals[numToTid[n]] : null;
+                    return t != null ? '$n ${t.unitName}' : '$n';
+                  }).join(' ، ')}',
+                  Colors.amber),
+            ),
+          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), kReviewTone),
         ],
       ),
     );
@@ -7166,10 +6875,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final chips = <Widget>[];
     void add(String t, MaterialColor c) => chips.add(_flagChip(context, t, c));
     if (item.reprintSummary) add('🚨 REPRINT / SUMMARY', Colors.red);
-    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', Colors.orange);
+    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', kReviewTone);
     if (item.ignoredDoc) add('📄 مستند متجاهل - راجعه', Colors.grey);
     if (item.dupSuspect) {
-      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', Colors.orange);
+      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', kReviewTone);
     } else if (item.userExcluded) {
       add('🚫 مستبعد (مكرر)', Colors.grey);
     }
@@ -7186,10 +6895,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  String _subtitleSmall(ReceiptItem item) {
-    final full = subtitleOf(item, flags: false);
-    if (item.ignoredDoc || item.amount <= 0) return full;
-    return full.replaceFirst(' | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م', '');
+  // سطر المبلغ + سطر صغير (TID / المعاملات / مطابقة السيستم) + شارات للمشاكل بس.
+  // الفرق مع السيستم بيتكتب بالمبلغ (زيادة / ناقص) بدل علامة تحذير من غير شرح.
+  Widget _receiptSubtitle(ReceiptItem item) {
+    final cs = Theme.of(context).colorScheme;
+    final small = TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant);
+    final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
+    final parts = <String>['TID: ${item.tid ?? 'غير محدد'}$sfx'];
+    if (item.txn != null) parts.add('${_l(context, 'المعاملات', 'Txns')}: ${item.txn}');
+    final sl = _sysLineOf(item);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!item.ignoredDoc && item.amount > 0)
+          w.Text('${item.amount.toStringAsFixed(2)} ج.م',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+        w.Text(parts.join(' | '), maxLines: 1, overflow: TextOverflow.ellipsis, style: small),
+        if (item.batches.length > 1)
+          w.Text('= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}', style: small),
+        // سطر السيستم كامل (المبلغ + مطابق/الفرق) من غير قطع
+        if (sl != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red),
+          ),
+        _warnChips(item),
+      ],
+    );
+  }
+
+  // سطر السيستم للماكينة: المبلغ + مطابق أو الفرق (null = مفيش صورة سيستم)
+  SysLine? _sysLineOf(ReceiptItem item) {
+    if (item.ignoredDoc || item.userExcluded) return null;
+    final sys = _sysOf(item);
+    final diff = _sysDiffOf(item);
+    if (sys == null || sys.amount == null || diff == null) return null;
+    final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
+    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true);
+    return SysLine(
+        '$head | ${_l(context, 'فرق', 'Gap')}: '
+        '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
+        '${diff.abs().toStringAsFixed(2)} ج.م',
+        false);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -7237,14 +6984,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ? '\n🚫 مستبعد (مكرر)'
             : '';
     return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$sysStr${flags ? '$alt$dup$unu$extra' : ''}';
-  }
-
-  String warningsText() {
-    final sb = StringBuffer('ملاحظات للمراجعة (${warnings.length}):');
-    for (final w in warnings) {
-      sb.write('\n• $w');
-    }
-    return sb.toString();
   }
 
   void writeReport(String date) {
@@ -7313,11 +7052,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
     }
     final sw = Stopwatch()..start();
+    final logKind = auto ? 'auto' : (chainRunning ? 'chain' : 'manual');
+    Object? runErr;
+    if (!lite) {
+      logScan(
+          tab: 'home',
+          title: '▶ بدأ فحص التقفيل',
+          text: manualPaths != null ? 'صور محددة يدوياً (${manualPaths.length})' : (chainRunning ? 'ضمن الفحص الشامل' : ''),
+          kind: logKind);
+    }
     try {
       await _runPipelineInner(manualPaths: manualPaths, lite: lite);
+    } catch (e) {
+      runErr = e;
+      rethrow;
     } finally {
       _fullRunning = false;
       sw.stop();
+      if (!lite) {
+        try {
+          final rvL = processedItems.where((e) => e.needsReview).toList();
+          final wl = <String>[
+            for (final x in warnings.take(10)) '• $x',
+            if (warnings.length > 10) '• ... و${warnings.length - 10} ملاحظة تانية',
+          ];
+          if (runErr != null) {
+            logScan(tab: 'home', title: '⚠️ فحص التقفيل وقف بخطأ', text: runErr.toString().split('\n').first, bad: true, kind: logKind);
+          } else if (status.startsWith('اتوقف')) {
+            logScan(
+                tab: 'home',
+                title: '⏹ اتوقف فحص التقفيل',
+                text: '⏱ ${fmtElapsed(sw.elapsed)}',
+                kind: logKind);
+          } else {
+            final bad = rvL.isNotEmpty || missingTerminals.isNotEmpty;
+            logScan(
+                tab: 'home',
+                title: '${bad ? '⚠️' : '✅'} انتهى فحص التقفيل',
+                text: [
+                  '${processedItems.length} إيصال/صورة${rvL.isNotEmpty ? ' • ${rvL.length} للمراجعة' : ''}'
+                      '${missingTerminals.isNotEmpty ? ' • ناقص ${missingTerminals.length} ماكينة' : ''}'
+                      ' • ⏱ ${fmtElapsed(sw.elapsed)}',
+                  ...wl,
+                ].join('\n'),
+                bad: bad,
+                kind: logKind);
+            for (final it in processedItems) {
+              final ln = _liteLine(it);
+              if (ln == null) continue;
+              logScan(tab: 'home', title: ln, bad: ln.startsWith('⚠️'), kind: logKind, openKey: it.key);
+            }
+          }
+        } catch (_) {}
+      }
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
@@ -7353,9 +7140,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     await prepareDefaultFiles();
-    _learnedThisRun.clear();
-    registryWarnings.clear();
-    regroupNewMachines(); // ماكينات اتعلّمت من إيصالات الدفع في المرة اللي فاتت
+
     await loadScanCache();
     setState(() {
       busy = true;
@@ -7413,6 +7198,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       var pdfPages = 0;
       final used = <String>[];
       for (final pf in cpdfs) {
+        if (stopReq) break;
         setState(() => status = 'بقرأ صفحات ملف PDF: ${baseName(pf.path)}...');
         final pages = await extractPdfPages(pf);
         if (pages.isEmpty) continue;
@@ -7508,7 +7294,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             if (fx['nobc'] == true || fx['nobc'] == false) item.missingBatchClosed = fx['nobc'];
           }
     }
-
 
     // تسريع: نسخ/تصحيح صور الإيصالات المحفوظة في الكاش بيتجهز بالتوازي (3 مع بعض) قبل ما اللفة توصل لها
     final preFix = <String, Future<bool>>{};
@@ -7621,6 +7406,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
+        if (stopReq) break;
         final fkey = '${baseName(f.path)}:${f.lengthSync()}';
         final fxm = fixes[fkey];
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
@@ -7659,6 +7445,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
         if (!isReceipt && !skipPay && autoRotate) {
           for (final deg in const [0, 90, 270, 180]) {
+            if (stopReq) break;
             final tp = '$tmpDir/rot_$deg.jpg';
             try {
               final wrote = await fixImageAsync(f.path, tp, deg);
@@ -7676,6 +7463,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
 
+        if (stopReq) break;
         if (isReceipt) {
           final key = '${baseName(f.path)}:${f.lengthSync()}';
           final a = analyzeLines(toLines(res));
@@ -7687,7 +7475,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
-          if (needSecond) {
+          if (needSecond && !stopReq) {
             try {
             final ep = '$tmpDir/enh.jpg';
             await enhanceImageAsync(workPath, ep);
@@ -7810,7 +7598,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) {
         setState(() {
           busy = false;
-          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+          status = 'اتوقف الفحص. اضغط "فحص التقفيل" لو عايز تبدأ من جديد.';
         });
       }
       return;
@@ -7826,10 +7614,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
-    regroupNewMachines();
-    for (final r in rawReceipts) {
-      refreshItemFromRegistry(r);
-    }
     // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
     final prio = <String, int>{'manual': 0, 'terminal': 0, 'new-terminal': 0, 'fuzzy': 1, 'file-number': 2};
@@ -7890,7 +7674,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         continue;
       }
       final free = <int>[];
-      for (final n in machineNums()) {
+      for (var n = 1; n <= machineCount; n++) {
         if (terminals[numToTid[n]!]!.excelRow == r.row && !taken.containsKey(n)) {
           free.add(n);
         }
@@ -7932,12 +7716,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           warnings.add('$nm: الماكينة ${r.orderNum} ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي ${r.suffix}');
         } else if (r.how == 'auto-number' || r.how == 'conflict') {
           warnings.add('$nm: رقم الماكينة اتحدد تلقائياً (${r.orderNum}) - اتأكد منه');
-        } else if (!(r.how == 'terminal' || r.how == 'fuzzy' || r.how == 'manual')) {
+        } else if (!(r.how == 'terminal' || r.how == 'new-terminal' || r.how == 'fuzzy' || r.how == 'manual')) {
           warnings.add('$nm: الوحدة اتحددت بالاسم/الميرشانت فقط');
         }
       } else {
         warnings.add('$nm: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل');
       }
+    }
+
+    if (stopReq) {
+      dropProvisional();
+      if (mounted) {
+        setState(() {
+          busy = false;
+          status = 'اتوقف الفحص. اضغط "فحص التقفيل" لو عايز تبدأ من جديد.';
+        });
+      }
+      return;
     }
 
     // ═════════ المرحلة 3: إعادة التسمية (على مرحلتين عشان التعارض) ═════════
@@ -7987,21 +7782,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Widget _card(String title, List<Widget> children) => Card(
-        margin: const EdgeInsets.only(bottom: 10),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-              const SizedBox(height: 8),
-              ...children,
-            ],
-          ),
-        ),
-      );
-
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -8035,7 +7815,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
-          _moreMenu(context, busy: busy, onLog: () => shareDebugLog(context)),
+          _moreMenu(context, busy: busy),
         ],
       ),
       bottomNavigationBar: _scanBar(
@@ -8052,7 +7832,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
-          _settingsCard([
+          _settingsCollapsed(
+              context,
+              '${customDir != null ? baseName(customDir!) : _l(context, 'واتساب', 'WhatsApp')} • ${_periodLabel()}'
+              ' • ${_l(context, 'المخرجات', 'Output')}: ${customOut == null ? _l(context, 'الافتراضي', 'Default') : baseName(customOut!)}'
+              '${autoScan ? ' • ${_l(context, 'فحص تلقائي ✓', 'Auto-scan ✓')}' : ''}',
+              [
             _switchRow('فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             const Divider(height: 4),
             _sourceChips(context,
@@ -8093,8 +7878,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
             _quickBtn(Icons.picture_as_pdf, 'PDF',
                 pdf == null ? null : () => openFile(pdf, 'application/pdf')),
+            _quickBtn(Icons.chat, 'إرسال الكل', busy ? null : sendToWhatsApp),
             _quickBtn(Icons.drive_file_move, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs),
-            _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
             _quickBtn(Icons.add_photo_alternate, 'يدوي', busy ? null : pickManualImages),
           ]),
           if (processedItems.isNotEmpty) ...[
@@ -8138,14 +7923,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           for (final item in visItems)
             _swipeWrap(item, Card(
-              margin: const EdgeInsets.symmetric(vertical: 4),
+              margin: const EdgeInsets.symmetric(vertical: 2),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
                 side: BorderSide(
                   color: item.reprintSummary
-                      ? Colors.red
-                      : (item.missingBatchClosed ? Colors.orange : Theme.of(context).colorScheme.outlineVariant),
-                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.0),
+                      ? _tone(context, Colors.red)
+                      : (item.missingBatchClosed ? kReviewTone : Theme.of(context).colorScheme.outlineVariant),
+                  width: item.reprintSummary ? 2.0 : (item.missingBatchClosed ? 1.5 : 1.0),
                 ),
               ),
               clipBehavior: Clip.antiAlias,
@@ -8153,14 +7938,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               child: AnimatedContainer(
                duration: const Duration(milliseconds: 350),
                decoration: BoxDecoration(
-                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 5)),
+                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 4)),
                ),
                child: ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: const EdgeInsetsDirectional.fromSTEB(10, 0, 2, 0),
                 onTap: () => editReceipt(item),
                 leading: Image.file(
                   File(item.path),
-                  width: 48,
-                  height: 48,
+                  width: 40,
+                  height: 40,
                   fit: BoxFit.cover,
                 ),
                 title: Row(
@@ -8175,7 +7963,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       child: Text(
                         item.ignoredDoc || item.ign == 'drop'
                             ? 'مستند متجاهل - ${baseName(item.path)}'
-                            : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                            : (item.orderNum != null ? machineLabel(item.orderNum, item.unitName) : (item.unitName ?? 'وحدة غير معروفة')),
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -8184,37 +7972,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         padding: const EdgeInsetsDirectional.only(start: 6),
                         child: Icon(Icons.swipe, size: 14, color: Theme.of(context).colorScheme.onSurfaceVariant),
                       ),
-                    if ((_sysDiffOf(item) ?? 0) != 0)
-                      Padding(
-                        padding: const EdgeInsetsDirectional.only(start: 4),
-                        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(context, Colors.amber)),
-                      ),
                   ],
                 ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (!item.ignoredDoc && item.amount > 0)
-                      w.Text('${item.amount.toStringAsFixed(2)} ج.م',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
-                    w.Text(_subtitleSmall(item),
-                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                    _warnChips(item),
-                  ],
-                ),
+                subtitle: _receiptSubtitle(item),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (item.userExcluded)
                       IconButton(
                         tooltip: tr('رجّعه (احتسبه)'),
-                        icon: const Icon(Icons.undo, color: Colors.red),
+                        icon: Icon(Icons.undo, color: _tone(context, Colors.red)),
                         onPressed: busy
                             ? null
                             : () async {
                                 if (item.ign == 'drop') {
                                   keepIgnored(item);
                                   setState(() {});
+                                  _saveClosing(force: true);
                                 } else {
                                   keepAsExtraBatch(item, processedItems);
                                   await rebuildFiles();
@@ -8222,13 +7996,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               },
                       ),
                     if (item.needsReview)
-                      Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange))
+                      Icon(Icons.warning_amber, color: _tintBorder(context, kReviewTone))
                     else if (item.ignoredDoc || item.ign == 'drop' || item.userExcluded)
-                      const Icon(Icons.remove_circle_outline, color: Colors.grey)
+                      Icon(Icons.remove_circle_outline, color: Theme.of(context).colorScheme.outline)
                     else if (item.tid != null && item.amount > 0)
-                      const Icon(Icons.check_circle, color: Colors.green)
+                      Icon(Icons.check_circle, color: _tone(context, Colors.green))
                     else
-                      const Icon(Icons.cancel, color: Colors.red),
+                      Icon(Icons.cancel, color: _tone(context, Colors.red)),
                     PopupMenuButton<String>(
                       tooltip: tr('المزيد'),
                       padding: EdgeInsets.zero,
@@ -8239,12 +8013,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           openFile(item.path, 'image/*');
                         } else if (v == 'share') {
                           shareOneReceipt(item);
+                        } else if (v == 'retid') {
+                          reReadTerminal(item);
                         }
                       },
                       itemBuilder: (_) => [
                         PopupMenuItem(value: 'edit', child: w.Text(_l(context, 'تعديل', 'Edit'))),
                         PopupMenuItem(value: 'open', child: w.Text(_l(context, 'فتح الصورة', 'Open image'))),
                         PopupMenuItem(value: 'share', child: w.Text(_l(context, 'إرسال الصورة', 'Send image'))),
+                        PopupMenuItem(
+                            value: 'retid',
+                            enabled: !busy,
+                            child: w.Text(_l(context, 'إعادة قراءة الترمنل', 'Re-read terminal'))),
                       ],
                     ),
                   ],
@@ -8405,8 +8185,10 @@ class _FolderPickerState extends State<FolderPicker> {
     });
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 54,
         title: const Text('اختيار فولدر'),
         actions: [
+          const HeaderButtons(),
           IconButton(
             tooltip: 'فولدر جديد',
             icon: const Icon(Icons.create_new_folder_outlined),
@@ -8536,7 +8318,6 @@ class _FolderPickerState extends State<FolderPicker> {
   }
 }
 
-
 // ───────────────────── شاشة المراجعة ─────────────────────
 // ───────── صورة بتتكبّر (قرصة بصباعين + دبل تاب) علشان تشوف تفاصيل الباتش ─────────
 class ZoomableImage extends StatefulWidget {
@@ -8625,13 +8406,25 @@ class ReceiptZoomPage extends StatelessWidget {
   }
 }
 
+class SysLine {
+  final String text;
+  final bool ok;
+  const SysLine(this.text, this.ok);
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
   final bool single; // فتحناها من القلم: الحفظ بيقفل الشاشة (والسحب يمين/شمال بيتنقل بين الباتشات)
   final int initialIndex;
+  final SysLine? Function(ReceiptItem)? sysLineOf; // سطر مطابقة السيستم (من التقفيل)
   const ReviewPage(
-      {super.key, required this.items, this.allItems, this.single = false, this.initialIndex = 0});
+      {super.key,
+      required this.items,
+      this.allItems,
+      this.single = false,
+      this.initialIndex = 0,
+      this.sysLineOf});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -8800,6 +8593,54 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // ملخص المشاكل في أول الشاشة: اللي ملهوش بلوك قرار تحته + مطابقة السيستم، أو "مفيش مشاكل"
+  Widget _problemsBox(ReceiptItem it) {
+    final bad = <String>[];
+    if (it.reprintSummary) {
+      bad.add(_l(context, '🚨 الإيصال REPRINT أو SUMMARY (ممكن يكون مكرر)', '🚨 Receipt is REPRINT or SUMMARY (may be a duplicate)'));
+    } else if (it.missingBatchClosed && !it.ignoredDoc) {
+      bad.add(_l(context, '⚠️ مش مكتوب BATCH CLOSED SUCCESSFULLY - اتأكد منه', '⚠️ BATCH CLOSED SUCCESSFULLY is missing - verify'));
+    }
+    if (!it.userExcluded && !it.ignoredDoc) {
+      if (it.amount <= 0) {
+        bad.add(_l(context, '⚠️ المبلغ غير مقروء', '⚠️ Amount not readable'));
+      } else if (!it.ok) {
+        bad.add(_l(context, '⚠️ المبلغ المقروء محتاج تأكيد', '⚠️ Read amount needs confirmation'));
+      }
+      if (it.row == null) bad.add(_l(context, '⚠️ الوحدة غير معروفة', '⚠️ Unit unknown'));
+    }
+    final sl = (it.ignoredDoc || it.userExcluded) ? null : widget.sysLineOf?.call(it);
+    final good = !it.needsReview && bad.isEmpty && (sl == null || sl.ok);
+    final lines = <Widget>[
+      for (final b in bad)
+        Text(b, style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
+      if (sl != null)
+        Text(sl.text,
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
+      if (good && sl == null)
+        Text(_l(context, '✅ مفيش مشاكل', '✅ No problems'),
+            style: TextStyle(color: _tintFg(context, Colors.green), fontSize: 13)),
+    ];
+    if (lines.isEmpty) return const SizedBox.shrink();
+    final tone = good ? Colors.green : (bad.isEmpty && sl != null && !sl.ok ? Colors.red : kReviewTone);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: _tintBg(context, tone, soft: true),
+        border: Border.all(color: _tintBorder(context, tone)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        for (var k = 0; k < lines.length; k++)
+          Padding(padding: EdgeInsets.only(top: k == 0 ? 0 : 3), child: lines[k]),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     AppSettings.of(context);
@@ -8844,7 +8685,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 MaterialPageRoute(
                   builder: (_) => ReceiptZoomPage(
                     path: it.path,
-                    title: 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? ''}',
+                    title: it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? '؟'),
                   ),
                 ),
               ),
@@ -8859,13 +8700,14 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _problemsBox(it),
           if (it.dupSuspect || it.userExcluded)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8876,7 +8718,7 @@ class _ReviewPageState extends State<ReviewPage> {
                         ? '🚫 الإيصال ده مستبعد (مكرر).'
                         : '⚠️ مشكوك إنه مكرر: نفس الماكينة ${it.orderNum ?? ''} ونفس المبلغ. '
                             'مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8908,8 +8750,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8918,7 +8760,7 @@ class _ReviewPageState extends State<ReviewPage> {
                   Text(
                     '📄 التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش. '
                     'زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8948,8 +8790,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8957,7 +8799,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Text(
                     '📅 تاريخ الإيصال ${it.date} بينما أغلب الإيصالات ${it.dateMain}.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8989,14 +8831,14 @@ class _ReviewPageState extends State<ReviewPage> {
                 it.how == 'auto-number' || it.how == 'conflict'
                     ? '❓ رقم الماكينة اتحدد تلقائياً (${it.orderNum}) - اتأكد منه واضغط حفظ.'
                     : '❓ الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ.',
-                style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
               ),
             ),
           if (it.unusual != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text('⚠️ ${it.unusual}  (لو المبلغ صح اضغط حفظ)',
-                  style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13)),
+                  style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
             ),
           Text(
             'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
@@ -9010,7 +8852,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Expanded(
                     child: Text('⚠️ القراءة التانية: ${it.alt!.toStringAsFixed(2)}',
-                        style: TextStyle(color: _tintFg(context, Colors.orange))),
+                        style: TextStyle(color: _tintFg(context, kReviewTone))),
                   ),
                   TextButton(
                     onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
@@ -9056,12 +8898,29 @@ class _ReviewPageState extends State<ReviewPage> {
           DropdownButtonFormField<int>(
             value: order,
             isExpanded: true,
-            hint: const Text('اختر الماكينة'),
+            hint: const Text('اختر الماكينة (1..25)'),
+            selectedItemBuilder: (c) => [
+              for (var i = 1; i <= machineCount; i++)
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
+                ),
+            ],
             items: [
-              for (final i in machineNums())
+              for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
-                  child: Text(machineLabel(i)),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
+                      Text(
+                        'TID: ${numToTid[i]}  •  MID: ${merchantIdOfRow(terminals[numToTid[i]]!.excelRow) ?? '—'}',
+                        style: TextStyle(fontSize: 11.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
                 ),
             ],
             onChanged: (v) => setState(() => order = v),
@@ -9140,7 +8999,6 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 }
 
-
 // ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
 String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
 
@@ -9160,22 +9018,24 @@ List<Directory> findWhatsAppDocDirs() {
   return out;
 }
 
-Set<String> loadDoneM() {
-  final l = _readCfg()['doneM'];
-  return l is List ? l.map((e) => e.toString()).toSet() : <String>{};
-}
-
-void saveDoneM(Set<String> s) {
-  final m = _readCfg();
-  final l = s.toList();
-  m['doneM'] = l.length > 500 ? l.sublist(l.length - 500) : l;
-  _writeCfg(m);
-}
-
 void savePdfDir(String? f) {
   final m = _readCfg();
   m['pdfDir'] = f;
   _writeCfg(m);
+}
+
+// اسم الماكينة للعرض: "أبيس 1" / "برج العرب 2" (من غير كلمة ماكينة). الوحدة اللي فيها ماكينة واحدة بس بتظهر باسمها
+String machineLabel(int? orderNum, [String? unitName]) {
+  if (orderNum == null) return unitName ?? '؟';
+  final tid = numToTid[orderNum];
+  final info = tid != null ? terminals[tid] : null;
+  if (info == null) return unitName ?? '$orderNum';
+  final same = terminals.values.where((t) => t.excelRow == info.excelRow).toList()
+    ..sort((a, b) => a.orderNum.compareTo(b.orderNum));
+  final unit = info.unitName.trim();
+  if (same.length <= 1) return unit;
+  final k = same.indexWhere((t) => t.orderNum == info.orderNum) + 1;
+  return '$unit $k';
 }
 
 // الاسم الجديد: "1.أبيس.1.يوم.4.11" (وحدة فيها أكتر من ماكينة) أو "17.مديرية.الأمن.يوم.4.11"
@@ -9320,7 +9180,7 @@ class MCollector {
     }
     r.tid = tc.isNotEmpty
         ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
-        : (findTerminalIn([all]) ?? discoverTerminal([all], strict: true));
+        : (findTerminalIn([all]) ?? discoverTerminal([all]));
 
     // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
     if (days.isEmpty) {
@@ -9642,7 +9502,7 @@ MIdent _identify(String all) {
   }
   r.tid = tc.isNotEmpty
       ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
-      : (findTerminalIn([all]) ?? discoverTerminal([all], strict: true));
+      : (findTerminalIn([all]) ?? discoverTerminal([all]));
   final days = <String, int>{};
   for (final m in _dateRe.allMatches(all)) {
     final k = _dayKey(m.group(0)!);
@@ -9736,8 +9596,8 @@ const List<_NoteKind> _kNoteKinds = [
       'Pages failed to read',
       'التطبيق ما قدرش يقرا صفحة أو أكتر (أو اتقفل أثناء العد)، فالعدد ممكن يكون ناقص.',
       'The app could not read one or more pages (or it closed during counting), so the count may be incomplete.',
-      'اضغط "إعادة العد" وبعدين "بدء العد". لو اتكرر راجع الملف بنفسك.',
-      'Tap "Recount" then "Start counting". If it repeats, check the file yourself.'),
+      'اضغط "إعادة العد" وبعدين "فحص إيصالات الدفع". لو اتكرر راجع الملف بنفسك.',
+      'Tap "Recount" then "Scan payment receipts". If it repeats, check the file yourself.'),
   _NoteKind(
       'emptypages',
       1,
@@ -9890,7 +9750,7 @@ _St _statusOf(MResult r) {
   if (r.verdict > 0) return const _St('اتراجع: صح', 'Reviewed: OK', Colors.green);
   if (r.ok && r.softWarn) return const _St('سليم ⚠️ فرق بسيط', 'OK ⚠️ small difference', Colors.amber);
   if (r.ok) return const _St('سليم', 'OK', Colors.green);
-  return const _St('محتاج مراجعة', 'Needs review', Colors.orange);
+  return const _St('محتاج مراجعة', 'Needs review', kReviewTone);
 }
 
 // الباتش = العدد اللي مكتوب في خانة "الصح" (من إيصال الباتش)، والفعلي = العدد اللي التطبيق عدّه
@@ -9919,7 +9779,7 @@ String _diffText(BuildContext c, int d) => d == 0
     : (d > 0 ? _l(c, 'ناقص $d', 'Missing $d') : _l(c, 'زيادة ${-d}', 'Extra ${-d}'));
 
 MaterialColor _diffColor(int d) =>
-    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : Colors.orange));
+    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : kReviewTone));
 
 // فرق الباتش بسيط (أقل من kSoftGap): تحذير أصفر بدل الأحمر
 bool _batchSoft(MResult r) {
@@ -9930,7 +9790,7 @@ bool _batchSoft(MResult r) {
 
 String _mSummary(BuildContext c, MResult r) {
   if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
-  if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط بدء العد)', 'Not counted yet (tap Start counting)');
+  if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط فحص إيصالات الدفع)', 'Not counted yet (tap Scan payment receipts)');
   // الأرقام دايماً إنجليزي (Dart بيكتب الأرقام ASCII حتى لو الواجهة عربي)
   final manual = _batchManual(r);
   final n = r.orderNum;
@@ -9977,42 +9837,44 @@ Widget _mTitle(BuildContext c, MResult r) {
   final n = _splitMName(r.newName);
   final cs = Theme.of(c).colorScheme;
   final main = n == null ? (r.newName ?? '؟ ${r.pdfName}') : '${n.unit}${n.idx != null ? ' ${n.idx}' : ''}';
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Row(children: [
-        if (r.softWarn)
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: 4),
-            child: Icon(Icons.warning_amber, size: 18, color: _tintBorder(c, Colors.amber)),
-          ),
-        Flexible(
-          child: Text(main,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+  // سطر واحد: الاسم + (ماكينة • التاريخ) بخط صغير جنبه
+  return Row(children: [
+    if (r.softWarn)
+      Padding(
+        padding: const EdgeInsetsDirectional.only(end: 4),
+        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(c, Colors.amber)),
+      ),
+    Flexible(
+      child: w.Text.rich(
+        TextSpan(children: [
+          TextSpan(
+              text: tr(main),
               style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 15,
                   decoration: r.excluded ? TextDecoration.lineThrough : null)),
-        ),
-        if (!r.ok && !r.excluded)
-          Padding(
-            padding: const EdgeInsetsDirectional.only(start: 6),
-            child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
-          ),
-      ]),
-      if (n != null)
-        Text('${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-    ],
-  );
+          if (n != null)
+            TextSpan(
+                text: '   ${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ]),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+    if (!r.ok && !r.excluded)
+      Padding(
+        padding: const EdgeInsetsDirectional.only(start: 6),
+        child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
+      ),
+  ]);
 }
 
 Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone) {
   final cs = Theme.of(c).colorScheme;
   return Expanded(
     child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
       decoration: BoxDecoration(
         color: tone == null ? cs.surfaceContainerHighest.withAlpha(120) : _tintBg(c, tone),
         borderRadius: BorderRadius.circular(8),
@@ -10023,8 +9885,8 @@ Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone)
         children: [
           Text(value,
               style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
-          Text(label, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+                  fontSize: 14.5, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
+          Text(label, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
         ],
       ),
     ),
@@ -10044,22 +9906,40 @@ Widget _flagChip(BuildContext c, String text, MaterialColor col) => Container(
     );
 
 Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
+  final cs = Theme.of(c).colorScheme;
   if (r.excluded || r.pending) {
     return Text(
         r.pending && busy
             ? _l(c, 'بيتعدّ...', 'Counting...')
             : (r.pending ? _l(c, 'لسه ما اتعدّش', 'Not counted yet') : _mSummary(c, r)),
-        style: TextStyle(fontSize: 12, color: Theme.of(c).colorScheme.onSurfaceVariant));
+        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant));
   }
   final match = _batchMatch(r);
   final soft = _batchSoft(r);
   final batch = _mBatchShown(r);
   final sys = _mSysShown(r);
+  final seqLen = _statsOf(r).seqLen;
   String v(int? x) => x == null ? '—' : '$x';
   MaterialColor? gap(int? x) {
     if (r.verdict > 0 || x == null || x == r.count) return null;
     return (x - r.count).abs() < kSoftGap ? Colors.amber : Colors.red;
   }
+
+  // الزيادة والنقص بالرقم: المتوقع - الفعلي (موجب = ناقص، سالب = زيادة)
+  final gaps = <Widget>[];
+  if (r.verdict <= 0) {
+    void addGap(String src, int? expected) {
+      if (expected == null) return;
+      final d = expected - r.count;
+      if (d == 0) return;
+      gaps.add(_flagChip(c, '$src: ${_diffText(c, d)}', d.abs() < kSoftGap ? Colors.amber : Colors.red));
+    }
+
+    addGap(_l(c, 'عن الباتش', 'vs batch'), batch);
+    addGap(_l(c, 'عن السيستم', 'vs system'), sys);
+    addGap(_l(c, 'عن التسلسل', 'vs sequence'), seqLen);
+  }
+  final hasNotes = r.notes.any((n) => _noteKindOf(n).sev > 0);
 
   final MaterialColor? cTone = r.verdict > 0
       ? Colors.green
@@ -10068,7 +9948,7 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Padding(
-        padding: const EdgeInsets.only(top: 4),
+        padding: const EdgeInsets.only(top: 3),
         child: Row(children: [
           _statBox(c, _l(c, 'الإيصالات', 'Receipts'), '${r.count}', cTone),
           const SizedBox(width: 6),
@@ -10077,19 +9957,24 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
           _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
         ]),
       ),
-      if (r.verdict > 0 || r.notes.any((n) => _noteKindOf(n).sev > 0))
-        Padding(
-          padding: const EdgeInsets.only(top: 6),
+      // نفس الشكل لكل الكروت: المربعات التلاتة + صف شارات دايماً (شارة "سليم" لو مفيش حاجة)
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 22),
           child: Wrap(spacing: 6, runSpacing: 4, children: [
+            ...gaps,
             if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
-            if (r.notes.any((n) => _noteKindOf(n).sev > 0))
+            if (gaps.isEmpty && !hasNotes && r.ok && r.verdict <= 0) _flagChip(c, _l(c, '✓ سليم', '✓ OK'), Colors.green),
+            if (hasNotes)
               _flagChip(
                   c,
                   _l(c, '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} ملاحظة',
                       '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} note(s)'),
-                  Colors.orange),
+                  kReviewTone),
           ]),
         ),
+      ),
     ],
   );
 }
@@ -10100,12 +9985,12 @@ Color _mStripColor(MResult r) {
   final m = _batchMatch(r);
   if (r.verdict > 0 || m == true) return Colors.green;
   if (m == false) return _batchSoft(r) ? Colors.amber : Colors.red;
-  return r.ok ? Colors.green : Colors.orange;
+  return r.ok ? Colors.green : kReviewTone;
 }
 
 Color _itemStatusColor(ReceiptItem i) {
   if (i.reprintSummary) return Colors.red;
-  if (i.needsReview) return Colors.orange;
+  if (i.needsReview) return kReviewTone;
   if (i.ignoredDoc || i.ign == 'drop' || i.userExcluded) return Colors.grey;
   if (i.tid != null && i.amount > 0) return Colors.green;
   return Colors.red;
@@ -10183,7 +10068,7 @@ Widget _listTools(
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, Colors.orange))),
+                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, kReviewTone))),
                 ),
                 w.Text('${(done * 100 / total).round()}%',
                     style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -10194,7 +10079,7 @@ Widget _listTools(
                 child: LinearProgressIndicator(
                   value: done / total,
                   minHeight: 6,
-                  color: allOk ? Colors.green : Colors.orange,
+                  color: allOk ? _tone(context, Colors.green) : _tone(context, kReviewTone),
                 ),
               ),
             ],
@@ -10472,7 +10357,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
     final MaterialColor diffCol = r.verdict > 0 ? Colors.green : (bd == null ? Colors.blueGrey : _diffColor(bd));
 
     Widget noteCard(_NoteKind k) {
-      final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? Colors.orange : Colors.blue);
+      final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? kReviewTone : Colors.blue);
       return Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
@@ -10529,21 +10414,24 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
       if (stats.full != null) kv(_l(context, 'إيصالات مقروءة كاملة', 'Fully read receipts'), '${stats.full}'),
       if (stats.partial != null)
         kv(_l(context, 'إيصالات ناقصة القراءة', 'Partially read receipts'), '${stats.partial}',
-            color: stats.partial! > 0 ? Colors.orange : null),
+            color: stats.partial! > 0 ? kReviewTone : null),
       if (stats.seqMin != null)
         kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} ... ${pad6(stats.seqMax)}',
-            color: Colors.blueAccent),
+            color: _tone(context, Colors.blue)),
       if (stats.seqLen != null)
         kv(_l(context, 'العدد المتوقع من التسلسل', 'Expected from sequence'), '${stats.seqLen}'),
       if (stats.seqLen != null && !r.pending)
         kv(
             _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
             r.count == stats.seqLen ? _l(context, 'مطابق ✓', 'Match ✓') : '${r.count - stats.seqLen!}  (الفعلي - المتوقع)',
-            color: r.count == stats.seqLen ? Colors.green : Colors.orange),
+            color: r.count == stats.seqLen ? _tone(context, Colors.green) : _tone(context, kReviewTone)),
     ];
 
     return Scaffold(
-      appBar: AppBar(title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report'))),
+      appBar: AppBar(
+          toolbarHeight: 54,
+          title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report')),
+          actions: const [HeaderButtons()]),
       body: ListView(
         padding: const EdgeInsets.all(8),
         children: [
@@ -10630,7 +10518,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                     _bigAct(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
                       widget.onRecount();
                       setState(() {});
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "فحص إيصالات الدفع".', 'Marked for counting. Go back and tap "Scan payment receipts".'))));
                     }),
                   ],
                 ),
@@ -10712,7 +10600,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 if (diff != null)
                   kv(_l(context, 'الفرق', 'Difference'),
                       okAmt ? _l(context, 'مطابق ✓', 'Match ✓') : diff.toStringAsFixed(2),
-                      color: okAmt ? Colors.green : (all ? Colors.red : Colors.orange)),
+                      color: okAmt ? _tone(context, Colors.green) : (all ? _tone(context, Colors.red) : _tone(context, kReviewTone))),
                 w.Text(
                     ba == null
                         ? _l(context, 'مفيش مبلغ باتش مؤكد للماكينة دي للمقارنة.', 'No confirmed batch amount for this machine to compare.')
@@ -10740,7 +10628,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                           style: TextStyle(
                               fontSize: 14,
                               fontWeight: r.pageWarn.contains(e.key) ? FontWeight.bold : FontWeight.normal,
-                              color: r.pageWarn.contains(e.key) ? Colors.orange : null)),
+                              color: r.pageWarn.contains(e.key) ? kReviewTone : null)),
                       if (r.pageNote[e.key] != null)
                         w.Text(r.pageNote[e.key]!, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                     ],
@@ -10847,7 +10735,10 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
         );
 
     return Scaffold(
-      appBar: AppBar(title: w.Text(_l(context, 'تقرير إيصالات الدفع', 'Payment receipts report'))),
+      appBar: AppBar(
+          toolbarHeight: 54,
+          title: w.Text(_l(context, 'تقرير إيصالات الدفع', 'Payment receipts report')),
+          actions: const [HeaderButtons()]),
       body: ListView(
         padding: const EdgeInsets.all(8),
         children: [
@@ -10858,7 +10749,7 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
               stat(_l(context, 'إجمالي المعاملات', 'Total transactions'), '$totalTx', Colors.blue),
               stat(_l(context, 'ملفات', 'Files'), '${all.length}', Colors.blueGrey),
               stat(_l(context, 'اتعدّت', 'Counted'), '${counted.length}', Colors.green),
-              stat(_l(context, 'محتاج مراجعة', 'Need review'), '$reviewN', reviewN > 0 ? Colors.orange : Colors.green),
+              stat(_l(context, 'محتاج مراجعة', 'Need review'), '$reviewN', reviewN > 0 ? kReviewTone : Colors.green),
               stat(_l(context, 'مستبعد', 'Excluded'), '$excl', Colors.grey),
               stat(_l(context, 'لسه ما اتعدّتش', 'Not counted'), '$pend', pend > 0 ? Colors.amber : Colors.green),
             ],
@@ -10999,7 +10890,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
     final sysRows = <Widget>[];
     for (final s in sysList) {
       final t = terminals[s.tid];
-      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
+      final nm = t != null ? machineLabel(t.orderNum, t.unitName) : 'ترمنل ${s.tid}';
       var tot = 0.0;
       var n = 0;
       if (t != null) {
@@ -11027,7 +10918,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                 style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _tintFg(context, okMatch ? Colors.green : Colors.orange))),
+                    color: _tintFg(context, okMatch ? Colors.green : kReviewTone))),
           ],
         ),
       ));
@@ -11065,7 +10956,9 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
       length: 2,
       child: Scaffold(
       appBar: AppBar(
+        toolbarHeight: 54,
         title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report')),
+        actions: const [HeaderButtons()],
         bottom: TabBar(tabs: [
           Tab(text: _l(context, 'ملخص', 'Summary')),
           Tab(text: '${_l(context, 'مراجعة', 'Review')} (${review.length + widget.warnings.length})'),
@@ -11084,7 +10977,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
               stat(_l(context, 'ناقص', 'Missing'), '${widget.missing.length}',
                   widget.missing.isNotEmpty ? Colors.amber : Colors.green),
               stat(_l(context, 'مراجعة', 'Review'), '${review.length}',
-                  review.isNotEmpty ? Colors.orange : Colors.green),
+                  review.isNotEmpty ? kReviewTone : Colors.green),
               stat(_l(context, 'مبالغ السيستم', 'System amounts'), '${sysList.length}', Colors.blueGrey),
               stat(_l(context, 'فروق السيستم', 'System differences'), '$sysDiffs',
                   sysDiffs > 0 ? Colors.red : Colors.green),
@@ -11099,7 +10992,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
             ], soft: true),
           if (widget.missing.isNotEmpty)
             box(Colors.amber, [
-              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} ${terminals.length}):',
+              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} $kMainMachines):',
                   style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.amber))),
               const SizedBox(height: 4),
               w.Text(
@@ -11118,7 +11011,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
         padding: const EdgeInsets.all(8),
         children: [
           if (widget.warnings.isNotEmpty)
-            box(Colors.orange, [
+            box(kReviewTone, [
               w.Text('${_l(context, 'ملاحظات للمراجعة', 'Notes for review')} (${widget.warnings.length}):',
                   style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
@@ -11147,11 +11040,11 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                   await widget.onOpen(it);
                   if (mounted) setState(() {});
                 },
-                leading: Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
+                leading: Icon(Icons.warning_amber, color: _tintBorder(context, kReviewTone)),
                 title: w.Text(
                     it.ignoredDoc || it.ign == 'drop'
                         ? 'مستند متجاهل - ${baseName(it.path)}'
-                        : 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? 'وحدة غير معروفة'}',
+                        : (it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? 'وحدة غير معروفة')),
                     style: const TextStyle(fontWeight: FontWeight.bold)),
                 subtitle: w.Text(widget.subtitleOf(it), style: const TextStyle(fontSize: 12)),
               ),
@@ -11185,7 +11078,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   bool stopReq = false;
   bool settingsOpen = false;
   double progressValue = 0;
-  String status = 'اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.';
+  String status = 'اضغط "فحص إيصالات الدفع" لفحص إيصالات الدفع من مستندات واتساب.';
   final List<MResult> results = [];
   AppLifecycleState _life = AppLifecycleState.resumed;
   String destDir = loadMOut();
@@ -11378,7 +11271,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
+  // نفس زرار "فحص إيصالات الدفع": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
   List<MResult> _visibleResults() {
     var l = results.where((r) => !reviewOnly || !r.ok).toList();
     final q = _q.trim().toLowerCase();
@@ -11442,14 +11335,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
+    settingsResetSignal.addListener(_onSettingsReset);
     closingTxn.addListener(_onClosing);
-    registryRev.addListener(_onRegistry);
     results.addAll(loadMState());
     results.sort(_cmpM);
     final pend = results.where((r) => r.pending).length;
     if (results.isNotEmpty) {
       status = pend > 0
-          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"بدء العد\" لما تحب.'
+          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"فحص إيصالات الدفع\" لما تحب.'
           : 'آخر نتيجة: ${results.length} ملف.';
     }
   }
@@ -11463,8 +11356,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     openReqG.removeListener(_onOpenReqM);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
+    settingsResetSignal.removeListener(_onSettingsReset);
     closingTxn.removeListener(_onClosing);
-    registryRev.removeListener(_onRegistry);
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
       r.ctl.dispose();
@@ -11483,6 +11376,17 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     setState(() => days = sharedDays.value);
   }
 
+  // "رجّع كل الإعدادات للافتراضي": الفولدرات والفترة والفحص التلقائي
+  void _onSettingsReset() {
+    if (!mounted) return;
+    if (autoScan) _setAuto(false);
+    setState(() {
+      pdfDir = null;
+      destDir = defaultMDest;
+      days = 0;
+    });
+  }
+
   void _onWipe() {
     if (!mounted) return;
     for (final r in results) {
@@ -11493,26 +11397,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       progressValue = 0;
       namingDone = false;
       reviewOnly = false;
-      status = 'تم مسح كل حاجة. اضغط "فحص وإعادة تسمية" لبدء يوم جديد.';
-    });
-  }
-
-  // اتعدّلت الماكينات من الشاشة: أرقام الملفات تتحدّث من الـ Terminal ID (الأسماء اللي اتنسخت قبل كده بتتحدث في الفحص الجاي)
-  void _onRegistry() {
-    if (!mounted || busy) return;
-    var stale = 0;
-    for (final r in results) {
-      final t = r.tidUsed;
-      final info = t == null ? null : terminals[t];
-      if (info == null) continue;
-      if (r.orderNum != info.orderNum) stale++;
-      r.orderNum = info.orderNum;
-    }
-    saveMState(results);
-    setState(() {
-      if (stale > 0) {
-        status = '$status\n⚠️ $stale ملف أرقام ماكينته اتغيرت: اضغط "فحص" علشان الأسماء تتحدث.';
-      }
+      status = 'تم مسح كل حاجة. اضغط "فحص إيصالات الدفع" لبدء يوم جديد.';
     });
   }
 
@@ -11639,17 +11524,33 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  // نقل PDF الإيصالات اللي اتسمّت ومش مستبعدة (سواء محتاجة مراجعة أو لأ) لفولدر أختاره من التليفون
+  // مسار الملف الفعلي للنقل: الملف المسمّى لو موجود، وإلا الأصلي (ملفات فيها مشكلة وما اتسمّتش)
+  String? _transferPathOf(MResult r) {
+    final op = r.openPath;
+    if (op != null && File(op).existsSync()) return op;
+    if (r.srcPath.isNotEmpty && File(r.srcPath).existsSync()) return r.srcPath;
+    return null;
+  }
+
+  // نقل كل ملفات الدفع (حتى اللي فيها مشكلة أو لسه متسمّتش) ما عدا المستبعد، لفولدر بتاريخ اليوم
   Future<void> transferGood() async {
-    final good = results
-        .where((r) => !r.excluded && r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
-        .toList();
-    final moved = await transferFilesViaPicker(context, good.map((r) => r.openPath!).toList());
-    if (moved == null || moved.isEmpty || !mounted) return;
-    for (final r in good) {
-      final np = moved[r.openPath];
-      if (np != null) r.openPath = np;
+    final items = <MResult, String>{};
+    for (final r in results) {
+      if (r.excluded) continue;
+      final p = _transferPathOf(r);
+      if (p != null) items[r] = p;
     }
+    // النسخ متاح بعد التسمية (حتى لو العد شغال)، والنقل بس بعد ما العد يخلص
+    final countDone = !busy && !results.any((r) => !r.excluded && r.pending);
+    final moved = await transferFilesViaPicker(context, items.values.toSet().toList(), allowMove: countDone);
+    if (moved == null || moved.isEmpty || !mounted) return;
+    items.forEach((r, p) {
+      final np = moved[p];
+      if (np == null) return;
+      if (File(p).existsSync()) return; // نسخ: الأصل لسه موجود فالمسارات ما تتغيرش
+      if (r.srcPath == p) r.srcPath = np;
+      r.openPath = np;
+    });
     saveMState(results);
     setState(() {});
   }
@@ -11708,7 +11609,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (busy) return;
     int? guess = r.orderNum;
     guess ??= int.tryParse(RegExp(r'^\s*(\d{1,2})').firstMatch(r.pdfName)?.group(1) ?? '');
-    if (guess != null && !numToTid.containsKey(guess)) guess = null;
+    if (guess != null && (guess < 1 || guess > machineCount)) guess = null;
     int? sel = guess;
     final picked = await showDialog<int>(
       context: context,
@@ -11720,10 +11621,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             value: sel,
             hint: const Text('اختار الماكينة'),
             items: [
-              for (final i in machineNums())
+              for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
-                  child: Text(machineLabel(i)),
+                  child: Text('ماكينة $i - ${terminals[numToTid[i]]?.unitName ?? ''}${terminals[numToTid[i]]?.spare == true ? ' (احتياطي)' : ''}'),
                 ),
             ],
             onChanged: (v) => setS(() => sel = v),
@@ -11769,7 +11670,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.detail = '';
     saveMState(results);
     if (!mounted) return;
-    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"بدء العد\" لعدّ إيصالاته.');
+    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"فحص إيصالات الدفع\" لعدّ إيصالاته.');
   }
 
   Future<void> markRestOk() async {
@@ -11867,10 +11768,34 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
     }
     final sw = Stopwatch()..start();
+    final logKind = chainRunning ? 'chain' : 'manual';
+    if (!lite) {
+      logScan(
+          tab: 'mach',
+          title: '▶ بدأ فحص إيصالات الدفع',
+          text: manualPaths != null ? 'ملفات محددة يدوياً (${manualPaths.length})' : (chainRunning ? 'ضمن الفحص الشامل' : ''),
+          kind: logKind);
+    }
     try {
       await _run(resumeOnly, count, manualPaths: manualPaths, lite: lite);
     } finally {
       sw.stop();
+      if (!lite) {
+        try {
+          final first = status.split('\n').first;
+          if (status.startsWith('اتوقف')) {
+            logScan(tab: 'mach', title: '⏹ اتوقف فحص إيصالات الدفع', text: '$first\n⏱ ${fmtElapsed(sw.elapsed)}', kind: logKind);
+          } else {
+            final failedRun = first.startsWith('حصل خطأ');
+            logScan(
+                tab: 'mach',
+                title: '${failedRun ? '⚠️' : '✅'} انتهى فحص إيصالات الدفع',
+                text: '$first\n⏱ ${fmtElapsed(sw.elapsed)}',
+                bad: failedRun,
+                kind: logKind);
+          }
+        } catch (_) {}
+      }
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
@@ -11898,8 +11823,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths, bool lite = false}) async {
     await prepareDefaultFiles();
-    registryWarnings.clear();
-    regroupNewMachines();
     setState(() {
       busy = true;
       stopReq = false;
@@ -11972,14 +11895,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       busy = false;
       progressValue = 0;
       if (crashed != null) {
-        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط \"فحص وتسمية وعد\" وهيكمّل من مكانه.';
+        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط \"فحص إيصالات الدفع\" وهيكمّل من مكانه.';
       } else if (stopReq) {
-        status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه.';
+        status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص إيصالات الدفع" وهيكمّل من مكانه.';
       } else if (results.isEmpty && idle != null) {
         status = idle;
       } else if (!count) {
         status = 'تمت التسمية: ${results.length} ملف، $named اتسمّى واتنسخ.'
-            '${pend > 0 ? ' اضغط \"بدء العد\" لعدّ إيصالات $pend ملف.' : ''}';
+            '${pend > 0 ? ' اضغط \"فحص إيصالات الدفع\" لعدّ إيصالات $pend ملف.' : ''}';
       } else {
         status = 'اكتمل العد: ${results.length} ملف، $named اتسمّى، إجمالي $total إيصال.'
             '${pend > 0 ? ' (فاضل $pend لسه)' : ''}';
@@ -12075,6 +11998,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       setState(() => status = 'تعريف الملفات ${i + 1} / ${pdfs.length}: $name');
       try {
         await _identifyOne(r, f, rec);
+      } on ScanStopped {
+        r.ctl.dispose();
+        break; // الملف ده ما اتسجلش: هيتعرّف تاني في الفحص الجاي
       } catch (e, st) {
         r.idOk = false;
         r.idNotes.add('فشل التعريف: ${e.toString().split('\n').first}');
@@ -12104,6 +12030,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final votes = <String, double>{};
     var id = MIdent();
     for (var pi = 0; pi < 25; pi++) {
+      if (stopReq) throw const ScanStopped();
       // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
       if (pi >= 6 && votes.isNotEmpty) break;
       var got = false;
@@ -12143,15 +12070,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.votes = votes;
     var tid = rk.isNotEmpty ? rk.first.key : id.tid;
     var fromUnit = false;
-    var strictTid = false;
-    // أصوات ضعيفة (تقريبية) أو مفيش: جرّب Terminal ID مقروء صريح مكرر في الملف (ممكن يكون ماكينة جديدة)
-    if (rk.isEmpty || rk.first.value < 1.0) {
-      final st = _discoverTerminalStrict([sb.toString()]);
-      if (st != null) {
-        tid = st;
-        strictTid = true;
-      }
-    }
     if (tid == null) {
       // مفيش Terminal ID مقروء: نحدد الوحدة من Merchant ID/اسم الوحدة جوه الـ PDF،
       // ولو الوحدة فيها ماكينة واحدة بس نستخدمها (وتتعلّم للمراجعة)
@@ -12172,7 +12090,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           '${tid == null ? all.substring(0, all.length > 2500 ? 2500 : all.length) : ''}\n\n',
           mode: FileMode.append);
     } catch (_) {}
-    final top = strictTid ? 3.0 : (rk.isNotEmpty ? rk.first.value : 0.0);
+    final top = rk.isNotEmpty ? rk.first.value : 0.0;
     final weak = tid != null &&
         ((!fromUnit && top < 2) || !_plausibleDay(id.day, id.month));
     if (weak) {
@@ -12336,6 +12254,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       try {
         await _countOne(r, rec);
+      } on ScanStopped {
+        // وقفنا في نص الملف: نسيبه "لسه ما اتعدّش" علشان يتكمل من أول مرة تانية
+        r.count = -1;
+        r.tries = 0;
+        r.cntNotes.clear();
+        saveMState(results);
+        break;
       } catch (e, st) {
         _dbg('COUNT_ERROR ${r.pdfName}: $e\n$st');
         r.count = 0;
@@ -12344,13 +12269,21 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       r.tries = 0;
       saveMState(results);
+      if (only == null) {
+        logScan(
+            tab: 'mach',
+            title: '${r.cntOk ? '✅' : '⚠️'} ${r.newName ?? r.pdfName}: ${r.count} إيصال',
+            text: r.cntNotes.join('\n'),
+            bad: !r.cntOk,
+            kind: chainRunning ? 'chain' : 'manual',
+            openKey: r.key);
+      }
       _dbg('COUNT ${i + 1}/${todo.length} ${r.newName ?? r.pdfName} = ${r.count}  RSS=${ProcessInfo.currentRss ~/ 1048576}MB');
       if (!mounted) return;
       setState(() => progressValue = (i + 1) / todo.length);
     }
     _curLabel = '';
   }
-
 
   // العد السريع: بيقرا صورة كل صفحة مرة واحدة من غير تحويل PNG ولا شرائح. بيرجّع false لو الملف مش ممسوح
   Future<bool> _countOneFast(MResult r, TextRecognizer rec, Uint8List bytes, File src) async {
@@ -12378,6 +12311,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       final recs = <TextRecognizer>[rec, ...extra];
       try {
         for (var i0 = 0; i0 < ranges.length; i0 += recs.length) {
+          if (stopReq) throw const ScanStopped();
           final idxs = <int>[for (var k = i0; k < i0 + recs.length && k < ranges.length; k++) k];
           _ensureMTmp();
           _tick(i0 + 1, ranges.length);
@@ -12441,6 +12375,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
     }
     if (!par) for (var i = 0; i < ranges.length; i++) {
+      if (stopReq) throw const ScanStopped();
       final fp = File('$mTmpDir/f_$i.jpg');
       try {
         _ensureMTmp();
@@ -12507,6 +12442,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
     }
     for (final k in (redFixCount ? (sus.toList()..sort()) : <int>[])) {
+      if (stopReq) throw const ScanStopped();
       try {
         _ensureMTmp();
         final p1 = '$mTmpDir/rr_${k - 1}.jpg';
@@ -12595,6 +12531,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     total = chosenM == 1 ? total1 : (chosenM == 2 ? total2 : total3);
     // العدد بيتحدد من القراءة بس. الباتش والسيستم بيتقارنوا بيه في التقرير ومش بيأثروا عليه أبداً.
     // ───── آخر صفحة: قراءة تانية بصورة محسّنة للمقارنة بس (من غير أي مرجع من الباتش أو السيستم) ─────
+    if (stopReq) throw const ScanStopped();
     var lastInfo = '';
     final lastKeys = pageSm3.keys.toList()..sort();
     if (lastKeys.isNotEmpty) {
@@ -12770,6 +12707,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (fastCount) {
       try {
         if (await _countOneFast(r, rec, bytes, src)) return;
+      } on ScanStopped {
+        rethrow;
       } catch (e) {
         _dbg('FAST فشل وهنكمل بالطريقة الدقيقة: $e');
       }
@@ -12787,6 +12726,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final failedPages = <int>[];
     var consecFail = 0;
     for (var pg = 1; pg <= 400; pg++) {
+      if (stopReq) throw const ScanStopped();
       var got = false;
       Object? lastErr;
       for (var attempt = 0; attempt < 2 && !got; attempt++) {
@@ -12870,13 +12810,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.count = -1;
     r.tries = 0;
     saveMState(results);
-    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"بدء العد\".');
+    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"فحص إيصالات الدفع\".');
   }
 
   List<String> missingMachines() {
     final got = results.where((r) => !r.excluded).map((r) => r.orderNum).whereType<int>().toSet();
     final out = <String>[];
-    for (final n in expectedMachineNums()) {
+    for (var n = 1; n <= kMainMachines; n++) {
       if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
     }
     return out;
@@ -12916,17 +12856,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (mounted) setState(() {});
   }
 
-  Future<void> shareLog() async {
-    final f = File('$baseDir/id_debug.txt');
-    if (!f.existsSync()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')),
-      );
-      return;
-    }
-    await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج إيصالات الدفع');
-  }
-
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -12961,7 +12890,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
-          _moreMenu(context, busy: busy, onLog: shareLog),
+          _moreMenu(context, busy: busy),
         ],
       ),
       bottomNavigationBar: _scanBar(
@@ -12978,7 +12907,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       body: ListView(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
-          _settingsCard([
+          _settingsCollapsed(
+              context,
+              '${pdfDir != null ? baseName(pdfDir!) : _l(context, 'واتساب', 'WhatsApp')} • ${_periodLabelOf(days)}'
+              ' • ${_l(context, 'المخرجات', 'Output')}: ${destDir == defaultMDest ? _l(context, 'الافتراضي', 'Default') : baseName(destDir)}'
+              '${autoScan ? ' • ${_l(context, 'فحص تلقائي ✓', 'Auto-scan ✓')}' : ''}',
+              [
             _switchRow('فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             _countMethodsPanel(busy: busy, onChanged: () => setState(() {})),
             const Divider(height: 4),
@@ -13010,11 +12944,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           const SizedBox(height: 6),
           Row(
             children: [
-              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blue),
-              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.green),
-              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.purple),
-              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
-              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', Colors.orange),
+              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blueGrey, compact: true),
+              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.blueGrey, compact: true),
+              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.blueGrey, compact: true),
+              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber, compact: true),
+              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', kReviewTone, compact: true),
             ],
           ),
           const SizedBox(height: 6),
@@ -13024,11 +12958,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
             _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
-                busy || named == 0 ? null : transferGood),
-            _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
+                (busy && !namingDone) || results.every((r) => r.excluded) ? null : transferGood),
+            _quickBtnG(context, Icons.note_add, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
-          _filterRow(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
+          _filterRowCompact(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
           _reviewTools(context,
               hint: _l(context, 'اسحب أي ملف لتعليمه: صح ✓ أو غلط ✗',
                   'Swipe any file to mark it: OK ✓ or wrong ✗'),
@@ -13115,12 +13049,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 350),
                     decoration: BoxDecoration(
-                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 5)),
+                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 4)),
                     ),
                     child: InkWell(
                     onTap: () => openReport(r),
                     child: Padding(
-                    padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
+                    padding: const EdgeInsetsDirectional.fromSTEB(12, 5, 4, 5),
                     child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -13136,44 +13070,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                       ),
                     ),
                     SizedBox(
-                      width: 118,
+                      width: 52,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(
-                            width: 66,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                            Text(_l(context, 'الباتش', 'Batch'),
-                                style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                            const SizedBox(height: 2),
-                            TextField(
-                              controller: r.ctl,
-                              keyboardType: TextInputType.number,
-                              textAlign: TextAlign.center,
-                              decoration: InputDecoration(
-                                isDense: true,
-                                contentPadding:
-                                    const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-                                hintText: _batchAutoOf(r)?.toString() ?? tr('الصح'),
-                                hintStyle: const TextStyle(fontSize: 13),
-                                border: const OutlineInputBorder(),
-                                filled: match != null,
-                                fillColor: match == null
-                                    ? null
-                                    : (match ? _tintBg(context, Colors.green, strong: true) : (soft ? _tintBg(context, Colors.amber, strong: true) : _tintBg(context, Colors.red, strong: true))),
-                              ),
-                              onChanged: (v) {
-                                saveMState(results);
-                                setState(() {});
-                              },
-                            ),
-                              ],
-                            ),
-                          ),
                           PopupMenuButton<String>(
                             tooltip: tr('المزيد'),
                             padding: EdgeInsets.zero,
@@ -13224,777 +13124,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               );
             }),
         ],
-      ),
-    );
-  }
-}
-
-// ═══════════════ شاشة إدارة الماكينات (نفس النسخة العامة) ═══════════════
-// قارئ xlsx بسيط وثابت (بيقرا الشيتات كنصوص) علشان أي ملف إعدادات يتقرا حتى لو اتحفظ من Excel / WPS
-String _xmlUnesc(String s) => s
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&amp;', '&');
-
-Map<String, List<List<String>>> _readXlsxSheets(List<int> bytes) {
-  final arc = ZipDecoder().decodeBytes(bytes);
-  String? text(String n) {
-    for (final f in arc.files) {
-      if (f.isFile && f.name == n) return utf8.decode(f.content as List<int>, allowMalformed: true);
-    }
-    return null;
-  }
-
-  final shared = <String>[];
-  final ss = text('xl/sharedStrings.xml');
-  if (ss != null) {
-    for (final si in RegExp(r'<si\b[^>]*?(?:/>|>.*?</si>)', dotAll: true).allMatches(ss)) {
-      final sb = StringBuffer();
-      for (final tm in RegExp(r'<t\b[^>]*?>(.*?)</t>', dotAll: true).allMatches(si.group(0)!)) {
-        sb.write(_xmlUnesc(tm.group(1)!));
-      }
-      shared.add(sb.toString());
-    }
-  }
-  final wb = text('xl/workbook.xml') ?? '';
-  final rels = text('xl/_rels/workbook.xml.rels') ?? '';
-  final relTarget = <String, String>{};
-  for (final m in RegExp(r'<Relationship\b[^>]*>').allMatches(rels)) {
-    final tag = m.group(0)!;
-    final id = RegExp(r'\bId="([^"]+)"').firstMatch(tag)?.group(1);
-    final tg = RegExp(r'\bTarget="([^"]+)"').firstMatch(tag)?.group(1);
-    if (id != null && tg != null) relTarget[id] = tg.startsWith('/') ? tg.substring(1) : 'xl/$tg';
-  }
-  final out = <String, List<List<String>>>{};
-  for (final sm in RegExp(r'<sheet\b[^>]*>').allMatches(wb)) {
-    final tag = sm.group(0)!;
-    final name = _xmlUnesc(RegExp(r'\bname="([^"]*)"').firstMatch(tag)?.group(1) ?? '');
-    final rid = RegExp(r'\br:id="([^"]+)"').firstMatch(tag)?.group(1);
-    final path = rid == null ? null : relTarget[rid];
-    final xml = path == null ? null : text(path);
-    if (xml == null || name.isEmpty) continue;
-    final rows = <List<String>>[];
-    for (final rm in RegExp(r'<row\b[^>]*?(?:/>|>.*?</row>)', dotAll: true).allMatches(xml)) {
-      final row = <String>[];
-      for (final cm in RegExp(r'<c\b[^>]*?(?:/>|>.*?</c>)', dotAll: true).allMatches(rm.group(0)!)) {
-        final cell = cm.group(0)!;
-        final open = RegExp(r'<c\b[^>]*?/?>').firstMatch(cell)!.group(0)!;
-        final ref = RegExp(r'\br="([A-Z]+)\d+"').firstMatch(open)?.group(1);
-        final ty = RegExp(r'\bt="([^"]*)"').firstMatch(open)?.group(1);
-        var v = '';
-        if (ty == 'inlineStr') {
-          final sb = StringBuffer();
-          for (final tm in RegExp(r'<t\b[^>]*?>(.*?)</t>', dotAll: true).allMatches(cell)) {
-            sb.write(_xmlUnesc(tm.group(1)!));
-          }
-          v = sb.toString();
-        } else {
-          final vm = RegExp(r'<v>(.*?)</v>', dotAll: true).firstMatch(cell);
-          if (vm != null) {
-            v = _xmlUnesc(vm.group(1)!);
-            if (ty == 's') {
-              final k = int.tryParse(v.trim());
-              v = (k != null && k >= 0 && k < shared.length) ? shared[k] : '';
-            }
-          }
-        }
-        v = v.trim();
-        if (RegExp(r'^\d+\.0+$').hasMatch(v)) v = v.substring(0, v.indexOf('.'));
-        final ci = ref == null ? row.length : _colNum(ref) - 1;
-        while (row.length <= ci) {
-          row.add('');
-        }
-        row[ci] = v;
-      }
-      rows.add(row);
-    }
-    out[name] = rows;
-  }
-  return out;
-}
-
-
-// تصدير نسخة إكسيل احتياطية من الماكينات اللي ليها TID
-bool exportSettingsToExcel() {
-  try {
-    final f = File(settingsPath);
-    f.parent.createSync(recursive: true);
-    final excel = ex.Excel.createExcel();
-    final order = terminals.entries.toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
-    // الورقة الأساسية: كل سطور السجل بترتيبها (بما فيها المحجوز والإجازة)
-    excel.appendRow('Machines', <ex.CellValue?>[
-      ex.TextCellValue('Order'),
-      ex.TextCellValue('TID'),
-      ex.TextCellValue('Unit_Name'),
-      ex.TextCellValue('Merchant_ID'),
-      ex.TextCellValue('Status'),
-    ]);
-    for (var i = 0; i < registry.length; i++) {
-      final m = registry[i];
-      excel.appendRow('Machines', <ex.CellValue?>[
-        ex.IntCellValue(i + 1),
-        ex.TextCellValue(m.tid),
-        ex.TextCellValue(m.unit),
-        ex.TextCellValue(m.merchant),
-        ex.TextCellValue(m.status),
-      ]);
-    }
-    excel.appendRow('Terminals', <ex.CellValue?>[
-      ex.TextCellValue('Order'),
-      ex.TextCellValue('TID'),
-      ex.TextCellValue('Row'),
-      ex.TextCellValue('Unit_Name'),
-    ]);
-    for (final e in order) {
-      excel.appendRow('Terminals', <ex.CellValue?>[
-        ex.IntCellValue(e.value.orderNum),
-        ex.TextCellValue(e.key),
-        ex.IntCellValue(e.value.excelRow),
-        ex.TextCellValue(e.value.unitName),
-      ]);
-    }
-    excel.appendRow('Name_Hints', <ex.CellValue?>[ex.TextCellValue('Row'), ex.TextCellValue('Keywords')]);
-    for (final h in nameHints) {
-      excel.appendRow('Name_Hints', <ex.CellValue?>[ex.IntCellValue(h.value), ex.TextCellValue(h.key.join(','))]);
-    }
-    excel.appendRow('Merchant_Codes', <ex.CellValue?>[ex.TextCellValue('Merchant_Code'), ex.TextCellValue('Row')]);
-    for (final e in merchantCodeMap.entries) {
-      excel.appendRow('Merchant_Codes', <ex.CellValue?>[ex.TextCellValue(e.key), ex.IntCellValue(e.value)]);
-    }
-    excel.appendRow('TID_Fixes', <ex.CellValue?>[ex.TextCellValue('Wrong_TID'), ex.TextCellValue('Correct_TID')]);
-    for (final e in tidFix.entries) {
-      excel.appendRow('TID_Fixes', <ex.CellValue?>[ex.TextCellValue(e.key), ex.TextCellValue(e.value)]);
-    }
-    try {
-      excel.delete('Sheet1');
-    } catch (_) {}
-    final bytes = excel.save();
-    if (bytes == null) return false;
-    f.writeAsBytesSync(bytes);
-    return true;
-  } catch (e) {
-    _dbg('settings save error: $e');
-    return false;
-  }
-}
-
-
-Future<void> openMachinesManager(BuildContext context) async {
-  if (homeBusyG || machBusyG || chainRunning) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('استنى لحد ما الفحص يخلص أو وقّفه الأول.')),
-    );
-    return;
-  }
-  registryDirty = false;
-  await Navigator.push(context, MaterialPageRoute(builder: (_) => const MachinesManagePage()));
-  if (registryDirty) {
-    registryDirty = false;
-    registryRev.value++;
-  }
-}
-
-// استيراد احتياطي من ملف A2R_Settings.xlsx: بيستبدل السجل كله
-Future<bool> importRegistryFromExcel() async {
-  try {
-    final sheets = _readXlsxSheets(File(settingsPath).readAsBytesSync());
-    String c(List<String> r, int i) => i < r.length ? r[i].trim() : '';
-    final rows = <MachineRow>[];
-    final used = <String>{};
-    final ms = sheets['Machines'];
-    if (ms != null && ms.length >= 2) {
-      for (final r in ms.skip(1)) {
-        final t = _cleanTid(c(r, 1));
-        final tid = (t != null && used.add(t)) ? t : '';
-        final unit = c(r, 2);
-        final mer = c(r, 3).replaceAll(RegExp(r'\D'), '');
-        if (tid.isEmpty && unit.isEmpty && mer.isEmpty) continue;
-        rows.add(MachineRow(
-          tid: tid,
-          unit: unit,
-          merchant: mer,
-          status: c(r, 4) == 'off' ? 'off' : 'active',
-          lockName: unit.isNotEmpty,
-          lockMerch: mer.isNotEmpty,
-        ));
-      }
-    } else {
-      // شكل الملف القديم: Terminals (Order|TID|Row|Unit_Name) + Merchant_Codes (Merchant_Code|Row)
-      final ts = sheets['Terminals'];
-      if (ts != null && ts.length >= 2) {
-        final merOfRow = <int, String>{};
-        for (final r in (sheets['Merchant_Codes'] ?? const <List<String>>[]).skip(1)) {
-          final row = int.tryParse(c(r, 1));
-          final code = c(r, 0).replaceAll(RegExp(r'\D'), '');
-          if (row != null && code.isNotEmpty) merOfRow.putIfAbsent(row, () => code);
-        }
-        final list = ts.skip(1).toList()
-          ..sort((a, b) => (int.tryParse(c(a, 0)) ?? 9999).compareTo(int.tryParse(c(b, 0)) ?? 9999));
-        for (final r in list) {
-          final t = _cleanTid(c(r, 1));
-          if (t == null || !used.add(t)) continue;
-          final row = int.tryParse(c(r, 2));
-          final mc = row == null ? '' : (merOfRow[row] ?? '');
-          rows.add(MachineRow(tid: t, unit: c(r, 3), merchant: mc, lockName: true, lockMerch: mc.isNotEmpty));
-        }
-      }
-    }
-    if (rows.isEmpty) return false;
-    registry
-      ..clear()
-      ..addAll(rows);
-    rebuildFromRegistry();
-    saveRegistry();
-    return true;
-  } catch (e) {
-    _dbg('import registry error: $e');
-    return false;
-  }
-}
-
-String _flagText(String f) => f == 'new-unit'
-    ? '⚠️ Merchant ID مش مطابق لأي وحدة - راجعه'
-    : f == 'no-merchant'
-        ? '⚠️ Merchant ID مش مقروء - مش معروف تبع أنهي وحدة'
-        : f == 'by-name'
-            ? '⚠️ اتملت من مكان محجوز بالاسم فقط - اتأكد'
-            : '';
-
-String? _cleanTid(String raw) {
-  var d = raw.replaceAll(RegExp(r'\D'), '');
-  if (d.length > 8) d = d.substring(d.length - 8);
-  return d.length == 8 ? d : null;
-}
-
-// خانة Merchant ID: بتكتب فيها عادي، وكمان لما تدوس عليها بتظهر قايمة بكل الـ Merchant IDs المسجلة (مع اسم الوحدة)
-Widget _merchantField(TextEditingController c, String label) {
-  final opts = <String, String>{};
-  for (final r in registry) {
-    if (r.merchant.isNotEmpty) opts.putIfAbsent(r.merchant, () => r.unit);
-  }
-  return Autocomplete<String>(
-    initialValue: TextEditingValue(text: c.text),
-    optionsBuilder: (v) {
-      final q = v.text.replaceAll(RegExp(r'\D'), '');
-      return opts.keys.where((k) => q.isEmpty || k.contains(q));
-    },
-    onSelected: (o) => c.text = o,
-    fieldViewBuilder: (ctx, tc, fn, onSubmit) => TextField(
-      controller: tc,
-      focusNode: fn,
-      keyboardType: TextInputType.number,
-      onChanged: (v) => c.text = v,
-      decoration: InputDecoration(
-        labelText: label,
-        suffixIcon: opts.isEmpty ? null : const Icon(Icons.arrow_drop_down),
-      ),
-    ),
-    optionsViewBuilder: (ctx, onSelected, options) => Align(
-      alignment: Alignment.topLeft,
-      child: Material(
-        elevation: 4,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 220, maxWidth: 300),
-          child: ListView(
-            padding: EdgeInsets.zero,
-            shrinkWrap: true,
-            children: [
-              for (final o in options)
-                ListTile(
-                  dense: true,
-                  title: w.Text(o, textDirection: TextDirection.ltr),
-                  subtitle: w.Text(opts[o] ?? ''),
-                  onTap: () => onSelected(o),
-                ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-class MachinesManagePage extends StatefulWidget {
-  const MachinesManagePage({super.key});
-
-  @override
-  State<MachinesManagePage> createState() => _MachinesManagePageState();
-}
-
-class _MachinesManagePageState extends State<MachinesManagePage> {
-  void _commit() {
-    registryDirty = true;
-    rebuildFromRegistry();
-    saveRegistry();
-    if (mounted) setState(() {});
-  }
-
-  void _snack(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(m)));
-
-  bool _tidTaken(String tid, MachineRow except) => registry.any((x) => !identical(x, except) && x.tid == tid);
-
-  // ───── تعديل سطر ─────
-  Future<void> _edit(int i) async {
-    final m = registry[i];
-    final tid = TextEditingController(text: m.tid);
-    final name = TextEditingController(text: m.unit);
-    final mer = TextEditingController(text: m.merchant);
-    var off = m.status == 'off';
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) => AlertDialog(
-          title: w.Text('ماكينة ${i + 1}'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: tid,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(labelText: tr('Terminal ID (فاضي = مكان محجوز)')),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: name,
-                  textDirection: TextDirection.rtl,
-                  decoration: InputDecoration(labelText: tr('اسم الوحدة')),
-                ),
-                const SizedBox(height: 8),
-                _merchantField(mer, tr('Merchant ID')),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('إجازة (مش بتتحسب ناقصة)'),
-                  value: off,
-                  onChanged: (v) => setS(() => off = v),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('حفظ')),
-          ],
-        ),
-      ),
-    );
-    final tRaw = tid.text, nRaw = name.text.trim(), mRaw = mer.text.replaceAll(RegExp(r'\D'), '');
-    tid.dispose();
-    name.dispose();
-    mer.dispose();
-    if (ok != true) return;
-    String newTid = '';
-    if (tRaw.trim().isNotEmpty) {
-      final t = _cleanTid(tRaw);
-      if (t == null) {
-        _snack('Terminal ID لازم 8 أرقام.');
-        return;
-      }
-      if (_tidTaken(t, m)) {
-        _snack('الـ Terminal ID ده مسجل في ماكينة تانية.');
-        return;
-      }
-      newTid = t;
-    }
-    if (nRaw != m.unit) {
-      m.unit = nRaw;
-      m.lockName = nRaw.isNotEmpty; // اتعدّل يدوي: الفحص ما يغيّرهوش
-    }
-    if (mRaw != m.merchant) {
-      m.merchant = mRaw;
-      m.lockMerch = mRaw.isNotEmpty;
-    }
-    m.tid = newTid;
-    m.status = off ? 'off' : 'active';
-    m.flag = '';
-    m.auto = false;
-    _commit();
-  }
-
-  Future<void> _delete(int i) async {
-    final m = registry[i];
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: w.Text('مسح ماكينة ${i + 1}؟'),
-        content: const Text('اللي بعدها هيتزحزح رقمه. الأسماء القديمة للصور هتتحدث في الفحص الجاي.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('مسح'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    registry.remove(m);
-    _commit();
-  }
-
-  // ───── إضافة ماكينة (محجوزة) في مكان معين ─────
-  Future<void> _addAt() async {
-    final pos = TextEditingController(text: '${registry.length + 1}');
-    final name = TextEditingController();
-    final mer = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('إضافة ماكينة في مكان معين'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: pos,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(labelText: tr('في أنهي رقم؟ (اللي بعده هيتزحزح)')),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: name,
-                textDirection: TextDirection.rtl,
-                decoration: InputDecoration(labelText: tr('اسم الوحدة')),
-              ),
-              const SizedBox(height: 8),
-              _merchantField(mer, tr('Merchant ID (ده اللي بيربطها بالوحدة)')),
-              const SizedBox(height: 8),
-              const Text('هتفضل محجوزة (من غير Terminal ID) لحد ما تظهر في فحص بنفس الـ Merchant ID فتتسجل لوحدها.',
-                  style: TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('إضافة')),
-        ],
-      ),
-    );
-    final p = int.tryParse(pos.text.trim()) ?? registry.length + 1;
-    final n = name.text.trim();
-    final d = mer.text.replaceAll(RegExp(r'\D'), '');
-    pos.dispose();
-    name.dispose();
-    mer.dispose();
-    if (ok != true) return;
-    if (n.isEmpty && d.isEmpty) {
-      _snack('اكتب اسم الوحدة أو الـ Merchant ID.');
-      return;
-    }
-    final at = (p - 1).clamp(0, registry.length);
-    registry.insert(at, MachineRow(unit: n, merchant: d, lockName: n.isNotEmpty, lockMerch: d.isNotEmpty));
-    _commit();
-    _snack('اتضافت ماكينة محجوزة رقم ${at + 1}');
-  }
-
-  // ───── لصق عمود واحد (سطر لكل ماكينة بالترتيب) ─────
-  Future<void> _pasteColumn(String kind) async {
-    final title = kind == 'tid' ? 'لصق Terminal IDs' : kind == 'merchant' ? 'لصق Merchant IDs' : 'لصق أسامي الوحدات';
-    final txt = TextEditingController();
-    final start = TextEditingController(text: '1');
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: start,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(labelText: tr('ابدأ من ماكينة رقم')),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: txt,
-                maxLines: 8,
-                textDirection: kind == 'name' ? TextDirection.rtl : TextDirection.ltr,
-                decoration: InputDecoration(
-                  hintText: tr('سطر لكل ماكينة'),
-                  border: const OutlineInputBorder(),
-                ),
-              ),
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: TextButton.icon(
-                  icon: const Icon(Icons.paste, size: 18),
-                  label: const Text('لصق من الحافظة'),
-                  onPressed: () async {
-                    final d = await Clipboard.getData('text/plain');
-                    if (d?.text != null) txt.text = d!.text!;
-                  },
-                ),
-              ),
-              const Text('السطر الفاضي بيتخطّى (الماكينة بتفضل زي ما هي). لو العمود أطول من القايمة بيتضاف سطور جديدة.',
-                  style: TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('تطبيق')),
-        ],
-      ),
-    );
-    final text = txt.text;
-    final s = (int.tryParse(start.text.trim()) ?? 1).clamp(1, registry.length + 1);
-    txt.dispose();
-    start.dispose();
-    if (ok != true) return;
-    final lines = text.split(RegExp(r'\r?\n'));
-    while (lines.isNotEmpty && lines.last.trim().isEmpty) {
-      lines.removeLast();
-    }
-    var idx = s - 1, done = 0, bad = 0;
-    for (final line in lines) {
-      final cur = idx++;
-      final raw = line.trim();
-      if (raw.isEmpty) continue;
-      // لو اتنسخ من إكسيل بأكتر من عمود: ناخد أول خلية
-      final v = raw.contains('\t') ? raw.split('\t').first.trim() : raw;
-      if (v.isEmpty) continue;
-      String? val;
-      if (kind == 'tid') {
-        val = _cleanTid(v);
-      } else if (kind == 'merchant') {
-        final d = v.replaceAll(RegExp(r'\D'), '');
-        val = d.isEmpty ? null : d;
-      } else {
-        val = v;
-      }
-      if (val == null) {
-        bad++;
-        continue;
-      }
-      while (registry.length <= cur) {
-        registry.add(MachineRow());
-      }
-      final m = registry[cur];
-      if (kind == 'tid') {
-        if (_tidTaken(val, m)) {
-          bad++;
-          continue;
-        }
-        m.tid = val;
-        m.auto = false;
-      } else if (kind == 'merchant') {
-        m.merchant = val;
-        m.lockMerch = true;
-      } else {
-        m.unit = val;
-        m.lockName = true;
-      }
-      m.flag = '';
-      done++;
-    }
-    _commit();
-    _snack('اتلصق $done${bad > 0 ? ' • اتخطّى $bad (رقم غلط أو مكرر)' : ''}');
-  }
-
-  // ───── إكسيل احتياطي ─────
-  Future<void> _exportExcel() async {
-    if (!exportSettingsToExcel()) {
-      _snack('مقدرتش أعمل الملف.');
-      return;
-    }
-    await Share.shareXFiles([XFile(settingsPath)], text: 'نسخة احتياطية: ماكينات A2R');
-  }
-
-  Future<void> _importExcel() async {
-    final yes = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('استيراد من إكسيل'),
-        content: const Text('القايمة الحالية كلها هتتستبدل بالموجود في الملف. تكمّل؟'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('لا')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('كمّل')),
-        ],
-      ),
-    );
-    if (yes != true) return;
-    try {
-      final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['xlsx']);
-      if (result.isEmpty) return;
-      final p = result.first.path;
-      if (p == null) return;
-      if (p != settingsPath) File(p).copySync(settingsPath);
-      final ok = await importRegistryFromExcel();
-      if (ok) registryDirty = true;
-      _snack(ok ? 'اتستورد ${registry.length} ماكينة.' : 'الملف مفيهوش ماكينات.');
-      if (mounted) setState(() {});
-    } catch (e) {
-      _dbg('import excel error: $e');
-      _snack('فشل الاستيراد.');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    AppSettings.of(context);
-    final cs = Theme.of(context).colorScheme;
-    final flagged = registry.where((m) => m.flag.isNotEmpty).length;
-    final reserved = registry.where((m) => m.reserved).length;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('إدارة الماكينات'),
-        actions: [
-          PopupMenuButton<String>(
-            onSelected: (v) {
-              if (v == 'export') _exportExcel();
-              if (v == 'import') _importExcel();
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'export', child: Text('تصدير نسخة إكسيل (احتياطي)')),
-              PopupMenuItem(value: 'import', child: Text('استيراد من إكسيل')),
-            ],
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  _mini(Icons.pin, 'لصق Terminal IDs', () => _pasteColumn('tid')),
-                  _mini(Icons.badge_outlined, 'لصق Merchant IDs', () => _pasteColumn('merchant')),
-                  _mini(Icons.drive_file_rename_outline, 'لصق الأسامي', () => _pasteColumn('name')),
-                  _mini(Icons.add_location_alt_outlined, 'إضافة في مكان معين', _addAt, filled: true),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: w.Text(
-                      '${registry.length} ماكينة • ${rowNames.length} وحدة • $reserved محجوزة'
-                      '${flagged > 0 ? ' • $flagged للمراجعة' : ''}',
-                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (registryWarnings.isNotEmpty)
-              Container(
-                margin: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: const Color(0x26FF9800),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.orange),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    for (final t in registryWarnings.take(6)) Text('• $t', style: const TextStyle(fontSize: 12)),
-                    if (registryWarnings.length > 6)
-                      Text('... و${registryWarnings.length - 6} تنبيه تاني', style: const TextStyle(fontSize: 12)),
-                    Align(
-                      alignment: AlignmentDirectional.centerEnd,
-                      child: TextButton(
-                        onPressed: () => setState(registryWarnings.clear),
-                        child: const Text('تمام'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            Expanded(
-              child: registry.isEmpty
-                  ? const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text('القايمة فاضية. اعمل فحص أول أو الصق البيانات من فوق.',
-                            textAlign: TextAlign.center),
-                      ),
-                    )
-                  : ReorderableListView.builder(
-                      buildDefaultDragHandles: false,
-                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
-                      itemCount: registry.length,
-                      onReorder: (o, n) {
-                        if (n > o) n--;
-                        final m = registry.removeAt(o);
-                        m.unplaced = false;
-                        registry.insert(n, m);
-                        _commit();
-                      },
-                      itemBuilder: (_, i) {
-                        final m = registry[i];
-                        final ft = _flagText(m.flag);
-                        return Card(
-                          key: ObjectKey(m),
-                          margin: const EdgeInsets.symmetric(vertical: 3),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            side: BorderSide(color: _unitColor(m.row), width: 1.5),
-                          ),
-                          child: ListTile(
-                            onTap: () => _edit(i),
-                            leading: CircleAvatar(
-                              backgroundColor: _unitColor(m.row),
-                              foregroundColor: Colors.white,
-                              child: w.Text('${i + 1}'),
-                            ),
-                            title: w.Text(
-                              m.reserved ? tr('محجوزة (لسه من غير Terminal ID)') : m.tid,
-                              textDirection: m.reserved ? null : TextDirection.ltr,
-                              style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: m.reserved ? cs.onSurfaceVariant : null),
-                            ),
-                            subtitle: w.Text(
-                              '${m.unit.isEmpty ? tr('من غير اسم') : m.unit}'
-                              '${m.merchant.isEmpty ? '' : '\nMerchant: ${m.merchant}'}'
-                              '${m.status == 'off' ? '\n${tr('🏖 إجازة')}' : ''}'
-                              '${ft.isEmpty ? '' : '\n${tr(ft)}'}',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            isThreeLine: true,
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (m.flag.isNotEmpty)
-                                  IconButton(
-                                    tooltip: tr('تمام، سيب التنبيه'),
-                                    icon: const Icon(Icons.check_circle_outline, color: Colors.orange),
-                                    onPressed: () {
-                                      m.flag = '';
-                                      _commit();
-                                    },
-                                  ),
-                                IconButton(
-                                  tooltip: tr('مسح'),
-                                  icon: const Icon(Icons.delete_outline),
-                                  onPressed: () => _delete(i),
-                                ),
-                                ReorderableDragStartListener(
-                                  index: i,
-                                  child: const Padding(
-                                    padding: EdgeInsets.all(6),
-                                    child: Icon(Icons.drag_handle),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
       ),
     );
   }
