@@ -1780,6 +1780,11 @@ const Map<String, String> _kEnExact = {
   'واتساب': 'WhatsApp',
   'إكسيل': 'Excel',
   'تدوير': 'Rotate',
+  'قص': 'Crop',
+  'قص الباتش': 'Crop batch',
+  'تطبيق على الـ PDF': 'Apply to PDF',
+  'تلقائي': 'Auto',
+  'مسح القص اليدوي': 'Clear manual crop',
   'السابق': 'Previous',
   'التالي': 'Next',
   'إيقاف': 'Stop',
@@ -4063,12 +4068,113 @@ List<String> _scanToPages(String src, String base) {
   return out;
 }
 
-Future<List<String>> scanReceiptAsync(String src) async {
+// ───────── القص اليدوي: 4 أركان (نسب 0..1 من الصورة بعد تصحيح الاتجاه) بترتيب tl, tr, bl, br ─────────
+final String cropStorePath = '$baseDir/.app_crops.json';
+
+Map<String, dynamic> _loadCrops() {
+  try {
+    return Map<String, dynamic>.from(jsonDecode(File(cropStorePath).readAsStringSync()) as Map);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
+}
+
+List<double>? cropOf(String path) {
+  final v = _loadCrops()[baseName(path)];
+  if (v is List && v.length == 8) {
+    return [for (final x in v) (x as num).toDouble()];
+  }
+  return null;
+}
+
+void saveCrop(String path, List<double>? q) {
+  try {
+    final m = _loadCrops();
+    if (q == null) {
+      m.remove(baseName(path));
+    } else {
+      m[baseName(path)] = q;
+    }
+    File(cropStorePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+// بتشتغل في Isolate: قص يدوي بالأركان اللي المستخدم حددها
+List<String> _scanManual(String src, String base, List<double> q) {
+  final p = '${base}_0.jpg';
+  try {
+    if (File(p).existsSync()) return <String>[p];
+    var im = img.decodeImage(File(src).readAsBytesSync());
+    if (im == null) return <String>[];
+    im = img.bakeOrientation(im);
+    final w = im.width.toDouble(), h = im.height.toDouble();
+    final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+    final o = _warpAndEnhance(im, px);
+    if (o == null) return <String>[];
+    File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
+    return <String>[p];
+  } catch (_) {
+    return <String>[];
+  }
+}
+
+// بتشتغل في Isolate: نسخة معاينة مصغّرة للصورة + الأركان (المحفوظة أو التلقائية)
+Map<String, dynamic> _prepCrop(String src, String dst, List<double>? saved) {
+  var im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode failed');
+  im = img.bakeOrientation(im);
+  final k = math.min(1.0, 1600.0 / math.max(im.width, im.height));
+  if (k < 1.0) {
+    im = img.copyResize(im,
+        width: (im.width * k).round(), height: (im.height * k).round(), interpolation: img.Interpolation.linear);
+  }
+  File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 88));
+  List<double>? q = saved;
+  var auto = false;
+  if (q == null) {
+    var quads = _detectReceipts(im, allowFull: false);
+    if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
+    if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
+    if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
+    if (quads.isNotEmpty) {
+      final a = quads.first;
+      q = <double>[
+        for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? im.width : im.height), 0.0, 1.0)
+      ];
+      auto = true;
+    }
+  }
+  q ??= <double>[0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9];
+  return <String, dynamic>{'w': im.width, 'h': im.height, 'q': q, 'auto': auto};
+}
+
+// بتشتغل في Isolate: المعاينة الحية للقص (نفس دالة الفرد والتحسين اللي بتتستخدم في الـ PDF)
+Uint8List? _warpPreview(String path, List<double> q) {
+  try {
+    final im = img.decodeJpg(File(path).readAsBytesSync());
+    if (im == null) return null;
+    final w = im.width.toDouble(), h = im.height.toDouble();
+    final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+    final o = _warpAndEnhance(im, px);
+    if (o == null) return null;
+    return Uint8List.fromList(img.encodeJpg(o, quality: 85));
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<List<String>> scanReceiptAsync(String src, {List<double>? manual}) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v7_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    final tag = manual == null
+        ? 'v7'
+        : 'm${manual.map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
+    final base = '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    if (manual != null) return await Isolate.run(() => _scanManual(src, base, manual));
     return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
@@ -6625,7 +6731,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
         var srcs = <String>[];
         try {
-          srcs = await scanReceiptAsync(r.path);
+          final mq = cropOf(r.path);
+          if (mq != null) srcs = await scanReceiptAsync(r.path, manual: mq);
+          if (srcs.isEmpty) srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
         // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
@@ -8444,6 +8552,251 @@ class SysLine {
   const SysLine(this.text, this.ok);
 }
 
+class CropPage extends StatefulWidget {
+  final String path;
+  const CropPage({super.key, required this.path});
+
+  @override
+  State<CropPage> createState() => _CropPageState();
+}
+
+class _CropPageState extends State<CropPage> {
+  String? prev;
+  double iw = 1, ih = 1;
+  List<double> q = <double>[0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9];
+  bool loading = true, failed = false, autoFound = false, busy = false;
+  int drag = -1;
+  int _seq = 0;
+  Uint8List? out;
+  Timer? _t;
+
+  @override
+  void initState() {
+    super.initState();
+    _init(true);
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _init(bool useSaved) async {
+    setState(() {
+      loading = true;
+      failed = false;
+    });
+    try {
+      Directory('$baseDir/.scans').createSync(recursive: true);
+      final src = widget.path;
+      final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+      final st = File(src).statSync();
+      final dst = '$baseDir/.scans/cp_${safe}_${st.size}.jpg';
+      final saved = useSaved ? cropOf(src) : null;
+      final r = await Isolate.run(() => _prepCrop(src, dst, saved));
+      if (!mounted) return;
+      await FileImage(File(dst)).evict();
+      setState(() {
+        prev = dst;
+        iw = (r['w'] as int).toDouble();
+        ih = (r['h'] as int).toDouble();
+        q = [for (final v in (r['q'] as List)) (v as num).toDouble()];
+        autoFound = r['auto'] == true;
+        loading = false;
+      });
+      _refreshPreview();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        loading = false;
+        failed = true;
+      });
+    }
+  }
+
+  void _schedule() {
+    _t?.cancel();
+    _t = Timer(const Duration(milliseconds: 150), _refreshPreview);
+  }
+
+  Future<void> _refreshPreview() async {
+    final p = prev;
+    if (p == null) return;
+    final qq = List<double>.from(q);
+    final my = ++_seq;
+    setState(() => busy = true);
+    final b = await Isolate.run(() => _warpPreview(p, qq));
+    if (!mounted || my != _seq) return;
+    setState(() {
+      out = b;
+      busy = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final editor = LayoutBuilder(builder: (c, box) {
+      final sc = math.min(box.maxWidth / iw, box.maxHeight / ih);
+      final dw = iw * sc, dh = ih * sc;
+      final ox = (box.maxWidth - dw) / 2, oy = (box.maxHeight - dh) / 2;
+      Offset pt(int i) => Offset(ox + q[2 * i] * dw, oy + q[2 * i + 1] * dh);
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanStart: (d) {
+          var best = -1;
+          var bd = 60.0;
+          for (var i = 0; i < 4; i++) {
+            final dd = (pt(i) - d.localPosition).distance;
+            if (dd < bd) {
+              bd = dd;
+              best = i;
+            }
+          }
+          drag = best;
+        },
+        onPanUpdate: (d) {
+          if (drag < 0) return;
+          setState(() {
+            q[2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
+            q[2 * drag + 1] = _cd((d.localPosition.dy - oy) / dh, 0.0, 1.0);
+          });
+        },
+        onPanEnd: (_) {
+          if (drag >= 0) _schedule();
+          drag = -1;
+        },
+        child: Stack(children: [
+          Positioned(
+            left: ox,
+            top: oy,
+            width: dw,
+            height: dh,
+            child: Image.file(File(prev!), fit: BoxFit.fill, gaplessPlayback: true),
+          ),
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _CropPainter([for (var i = 0; i < 4; i++) pt(i)]),
+            ),
+          ),
+        ]),
+      );
+    });
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('قص الباتش', style: TextStyle(fontSize: 16)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, <double>[]),
+            child: const Text('مسح القص اليدوي'),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : failed
+                ? const Center(child: Text('مقدرتش أفتح الصورة.'))
+                : Column(children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+                      child: Text(
+                        autoFound
+                            ? 'اسحب الدواير الأربعة على أركان الباتش. المعاينة تحت بتتحدّث لايف.'
+                            : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير الأربعة على أركانه.',
+                        style: const TextStyle(fontSize: 12.5),
+                      ),
+                    ),
+                    Expanded(flex: 5, child: editor),
+                    const Divider(height: 1),
+                    Expanded(
+                      flex: 4,
+                      child: Container(
+                        color: Colors.black12,
+                        width: double.infinity,
+                        child: Stack(children: [
+                          Positioned.fill(
+                            child: out == null
+                                ? const Center(child: CircularProgressIndicator())
+                                : InteractiveViewer(
+                                    maxScale: 5,
+                                    child: Image.memory(out!, fit: BoxFit.contain, gaplessPlayback: true),
+                                  ),
+                          ),
+                          if (busy && out != null)
+                            const Positioned(
+                              top: 6,
+                              right: 6,
+                              child: SizedBox(
+                                  width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                            ),
+                        ]),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(10),
+                      child: Row(children: [
+                        OutlinedButton(
+                          onPressed: () => _init(false),
+                          child: const Text('تلقائي'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('إلغاء'),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () => Navigator.pop(context, List<double>.from(q)),
+                            child: const Text('تطبيق على الـ PDF'),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  ]),
+      ),
+    );
+  }
+}
+
+class _CropPainter extends CustomPainter {
+  final List<Offset> p; // tl, tr, bl, br
+  _CropPainter(this.p);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(p[0].dx, p[0].dy)
+      ..lineTo(p[1].dx, p[1].dy)
+      ..lineTo(p[3].dx, p[3].dy)
+      ..lineTo(p[2].dx, p[2].dy)
+      ..close();
+    canvas.drawPath(path, Paint()..color = const Color(0x2200AAFF));
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = const Color(0xFF00AAFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.5);
+    for (final o in p) {
+      canvas.drawCircle(o, 14, Paint()..color = const Color(0x5500AAFF));
+      canvas.drawCircle(
+          o,
+          14,
+          Paint()
+            ..color = Colors.white
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.5);
+      canvas.drawCircle(o, 3, Paint()..color = const Color(0xFF00AAFF));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CropPainter old) => true;
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
@@ -8610,8 +8963,26 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // قص يدوي: بتحدد أركان الباتش بإيدك وتشوف المعاينة لايف، والـ PDF بيستخدم نفس القص
+  Future<void> cropBatch() async {
+    final r = await Navigator.push<List<double>>(
+      context,
+      MaterialPageRoute(builder: (_) => CropPage(path: item.path)),
+    );
+    if (r == null || !mounted) return;
+    saveCrop(item.path, r.isEmpty ? null : r);
+    changed = true;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(r.isEmpty
+          ? 'اتمسح القص اليدوي، الـ PDF هيرجع للقص التلقائي.'
+          : 'اتحفظ القص ✓ هيتطبق على الـ PDF أول ما تخلّص المراجعة.'),
+    ));
+    setState(() {});
+  }
+
   Future<void> rotate() async {
     try {
+      saveCrop(item.path, null); // التدوير بيغيّر اتجاه الصورة فالقص القديم مبقاش صالح
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
@@ -8964,6 +9335,12 @@ class _ReviewPageState extends State<ReviewPage> {
                 onPressed: rotate,
                 icon: const Icon(Icons.rotate_right),
                 label: const Text('تدوير'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: cropBatch,
+                icon: const Icon(Icons.crop),
+                label: const Text('قص'),
               ),
               const SizedBox(width: 8),
               Expanded(
