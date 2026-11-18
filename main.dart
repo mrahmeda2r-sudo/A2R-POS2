@@ -8598,7 +8598,8 @@ class _FolderPickerState extends State<FolderPicker> {
 class ZoomableImage extends StatefulWidget {
   final String path;
   final ValueChanged<bool>? onZoom; // بيبلّغ لما الصورة تتكبّر/ترجع (علشان السحب بين الباتشات)
-  const ZoomableImage({super.key, required this.path, this.onZoom});
+  final List<String>? paths; // لو موجودة: بتتعرض بدل الصورة الأصلية (الباتشات بعد القص، جنب بعض)
+  const ZoomableImage({super.key, required this.path, this.onZoom, this.paths});
 
   @override
   State<ZoomableImage> createState() => _ZoomableImageState();
@@ -8651,11 +8652,21 @@ class _ZoomableImageState extends State<ZoomableImage> {
         minScale: 1,
         maxScale: 12,
         child: Center(
-          child: Image.file(
-            File(widget.path),
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.high,
-          ),
+          child: (widget.paths != null && widget.paths!.isNotEmpty)
+              ? Row(children: [
+                  for (final pp in widget.paths!)
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
+                        child: Image.file(File(pp), fit: BoxFit.contain, filterQuality: FilterQuality.high),
+                      ),
+                    ),
+                ])
+              : Image.file(
+                  File(widget.path),
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
         ),
       ),
     );
@@ -8691,7 +8702,9 @@ class CropEditor extends StatefulWidget {
   final String path;
   final List<MergeCand> cands; // باقي الباتشات اللي ينفع تتضم جنب ده
   final void Function(CropResult?) onDone; // null = إلغاء
-  const CropEditor({super.key, required this.path, required this.onDone, this.cands = const <MergeCand>[]});
+  final bool inline; // جوه شاشة المراجعة: من غير معاينة سفلية (النتيجة بتظهر في الصورة بعد التطبيق)
+  const CropEditor(
+      {super.key, required this.path, required this.onDone, this.cands = const <MergeCand>[], this.inline = false});
 
   @override
   State<CropEditor> createState() => _CropEditorState();
@@ -8954,6 +8967,41 @@ class _CropEditorState extends State<CropEditor> {
               ),
             ),
           ),
+          // عدسة: بتكبّر المنطقة تحت صباعك وإنت بتسحب الركن (بتتحط في الجنب البعيد عن الصباع)
+          if (drag >= 0)
+            Builder(builder: (_) {
+              const ls = 120.0, zoom = 3.0;
+              final fp = pt(sel, drag);
+              final left = fp.dx < box.maxWidth / 2 ? box.maxWidth - ls - 8 : 8.0;
+              final top = fp.dy < box.maxHeight / 2 ? box.maxHeight - ls - 8 : 8.0;
+              return Positioned(
+                left: left,
+                top: top,
+                width: ls,
+                height: ls,
+                child: IgnorePointer(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.blueAccent, width: 3),
+                      color: Colors.black,
+                    ),
+                    child: ClipOval(
+                      child: Stack(children: [
+                        Positioned(
+                          left: ls / 2 - (fp.dx - ox) * zoom,
+                          top: ls / 2 - (fp.dy - oy) * zoom,
+                          width: dw * zoom,
+                          height: dh * zoom,
+                          child: Image.file(File(prev!), fit: BoxFit.fill, gaplessPlayback: true),
+                        ),
+                        const Center(child: Icon(Icons.add, color: Colors.redAccent, size: 22)),
+                      ]),
+                    ),
+                  ),
+                ),
+              );
+            }),
         ]),
       );
     });
@@ -8984,10 +9032,11 @@ class _CropEditorState extends State<CropEditor> {
                             ),
                         ]),
                       ),
-                    Expanded(flex: 5, child: editor),
+                    Expanded(flex: 7, child: editor),
+                    if (!widget.inline) ...[
                     const Divider(height: 1),
                     Expanded(
-                      flex: 4,
+                      flex: 3,
                       child: Container(
                         color: Colors.black12,
                         width: double.infinity,
@@ -9027,6 +9076,7 @@ class _CropEditorState extends State<CropEditor> {
                         ]),
                       ),
                     ),
+                    ],
                     Padding(
                       padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -9154,8 +9204,46 @@ class _ReviewPageState extends State<ReviewPage> {
   int? order;
   late PageController _pc;
   final ValueNotifier<bool> _zoomed = ValueNotifier<bool>(false);
+  // الباتشات بعد القص اليدوي (لكل صورة): بتتعرض في المراجعة بدل الصورة الأصلية، وبتتحدّث أول ما تحفظ القص
+  final Map<String, List<String>> _cropPages = <String, List<String>>{};
+  bool showOrig = false;
 
   ReceiptItem get item => widget.items[idx];
+
+  Future<void> _loadCropView(String p) async {
+    final mq = cropOf(p);
+    if (mq == null) {
+      if (_cropPages.remove(p) != null && mounted) setState(() => rev++);
+      return;
+    }
+    try {
+      final pages = <String>[];
+      pages.addAll(await scanReceiptAsync(p, manual: mq));
+      for (final n in mergeOf(p)) {
+        for (final x in (widget.allItems ?? widget.items)) {
+          if (baseName(x.path) != n || !File(x.path).existsSync()) continue;
+          var l = <String>[];
+          final q2 = cropOf(x.path);
+          if (q2 != null) l = await scanReceiptAsync(x.path, manual: q2);
+          if (l.isEmpty) l = await scanReceiptAsync(x.path);
+          pages.addAll(l.isEmpty ? <String>[x.path] : l);
+        }
+      }
+      if (!mounted) return;
+      if (pages.isEmpty) {
+        _cropPages.remove(p);
+      } else {
+        for (final f in pages) {
+          await FileImage(File(f)).evict();
+        }
+        _cropPages[p] = pages;
+      }
+      setState(() {
+        showOrig = false;
+        rev++;
+      });
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -9164,6 +9252,7 @@ class _ReviewPageState extends State<ReviewPage> {
     _pc = PageController(initialPage: idx);
     amt = TextEditingController();
     load();
+    _loadCropView(item.path);
   }
 
   @override
@@ -9177,6 +9266,7 @@ class _ReviewPageState extends State<ReviewPage> {
   void load() {
     amt.text = item.amount > 0 ? item.amount.toStringAsFixed(2) : '';
     order = item.orderNum;
+    if (!_cropPages.containsKey(item.path) && cropOf(item.path) != null) _loadCropView(item.path);
   }
 
   void go(int i) {
@@ -9345,9 +9435,15 @@ class _ReviewPageState extends State<ReviewPage> {
     if (r.clear) {
       saveCrop(p, null);
       saveMerge(p, null);
+      _cropPages.remove(p);
+      setState(() {
+        showOrig = false;
+        rev++;
+      });
     } else {
       saveCrop(p, r.quads);
       saveMerge(p, r.merged);
+      _loadCropView(p); // الصورة في المراجعة بتتبدّل بالباتش المقصوص فوراً
     }
     changed = true;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -9361,6 +9457,7 @@ class _ReviewPageState extends State<ReviewPage> {
   Future<void> rotate() async {
     try {
       saveCrop(item.path, null); // التدوير بيغيّر اتجاه الصورة فالقص القديم مبقاش صالح
+      _cropPages.remove(item.path);
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
@@ -9426,34 +9523,6 @@ class _ReviewPageState extends State<ReviewPage> {
   Widget build(BuildContext context) {
     AppSettings.of(context);
     final it = item;
-    if (cropMode) {
-      return PopScope(
-        canPop: false,
-        onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) _finishCrop(null);
-        },
-        child: Scaffold(
-          appBar: AppBar(
-            title: const Text('قص الباتش', style: TextStyle(fontSize: 16)),
-            leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => _finishCrop(null)),
-            actions: [
-              TextButton(
-                onPressed: () => _finishCrop(const CropResult(null, <String>[], clear: true)),
-                child: const Text('مسح القص اليدوي'),
-              ),
-            ],
-          ),
-          body: SafeArea(
-            child: CropEditor(
-              key: ValueKey('crop${it.path}'),
-              path: it.path,
-              cands: cropCands,
-              onDone: _finishCrop,
-            ),
-          ),
-        ),
-      );
-    }
     final image = Container(
       color: Colors.black12,
       child: Stack(
@@ -9474,8 +9543,9 @@ class _ReviewPageState extends State<ReviewPage> {
                   });
                 },
                 itemBuilder: (c, i) => ZoomableImage(
-                  key: ValueKey('${widget.items[i].path}#${i == idx ? rev : 0}'),
+                  key: ValueKey('${widget.items[i].path}#${i == idx ? rev : 0}#${showOrig ? 'o' : 'c'}'),
                   path: widget.items[i].path,
+                  paths: showOrig ? null : _cropPages[widget.items[i].path],
                   onZoom: (zz) {
                     if (i == idx) _zoomed.value = zz;
                   },
@@ -9493,13 +9563,24 @@ class _ReviewPageState extends State<ReviewPage> {
                 context,
                 MaterialPageRoute(
                   builder: (_) => ReceiptZoomPage(
-                    path: it.path,
+                    path: (!showOrig && (_cropPages[it.path]?.length ?? 0) == 1) ? _cropPages[it.path]!.first : it.path,
                     title: it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? '؟'),
                   ),
                 ),
               ),
             ),
           ),
+          if (_cropPages.containsKey(it.path))
+            Positioned(
+              top: 4,
+              right: 4,
+              child: FilterChip(
+                selected: !showOrig,
+                avatar: Icon(showOrig ? Icons.image_outlined : Icons.crop, size: 16),
+                label: Text(showOrig ? 'الأصلي' : 'المقصوص ✓', style: const TextStyle(fontSize: 12)),
+                onSelected: (_) => setState(() => showOrig = !showOrig),
+              ),
+            ),
         ],
       ),
     );
@@ -9782,19 +9863,31 @@ class _ReviewPageState extends State<ReviewPage> {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) Navigator.pop(context, changed);
+        if (didPop) return;
+        if (cropMode) {
+          _finishCrop(null);
+        } else {
+          Navigator.pop(context, changed);
+        }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text('مراجعة ${idx + 1} / ${widget.items.length}'
+          title: Text(cropMode ? 'قص الباتش' : 'مراجعة ${idx + 1} / ${widget.items.length}'
               '${done.contains(it) ? '  ✓' : ''}'
               '  •  ${it.needsReview ? _l(context, '⚠️ محتاج مراجعة', '⚠️ Needs review') : _l(context, '✅ سليم', '✅ OK')}',
               style: const TextStyle(fontSize: 16)),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            onPressed: () => Navigator.pop(context, changed),
+            onPressed: () => cropMode ? _finishCrop(null) : Navigator.pop(context, changed),
           ),
-          actions: [
+          actions: cropMode
+              ? [
+                  TextButton(
+                    onPressed: () => _finishCrop(const CropResult(null, <String>[], clear: true)),
+                    child: const Text('مسح القص اليدوي'),
+                  ),
+                ]
+              : [
             IconButton(
               icon: const Icon(Icons.navigate_before),
               tooltip: tr('السابق'),
@@ -9808,7 +9901,15 @@ class _ReviewPageState extends State<ReviewPage> {
           ],
         ),
         body: SafeArea(
-          child: LayoutBuilder(
+          child: cropMode
+              ? CropEditor(
+                  key: ValueKey('crop${it.path}'),
+                  path: it.path,
+                  cands: cropCands,
+                  inline: true,
+                  onDone: _finishCrop,
+                )
+              : LayoutBuilder(
             builder: (context, c) {
               if (c.maxWidth > 600) {
                 return Row(
