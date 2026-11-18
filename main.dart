@@ -3810,6 +3810,52 @@ List<List<double>> _detectReceipts(img.Image im, {int mode = 0, bool allowFull =
   return out;
 }
 
+// ثقة التحديد (0..1): الإيصال مستطيل طويل وضيق ومش هو الصورة كلها ولا حتة صغيرة
+double _quadScore(List<double> q, int iw, int ih) {
+  final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
+  final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
+  if (wq <= 0 || hq <= 0) return 0.0;
+  final ratio = math.max(wq, hq) / math.min(wq, hq);
+  final frac = _quadArea(q) / (iw * ih);
+  final rs = ((ratio - 1.3) / 0.9).clamp(0.0, 1.0).toDouble();
+  final ars = frac > 0.92 ? 0.0 : (frac < 0.03 ? 0.0 : (frac < 0.08 ? (frac - 0.03) / 0.05 : 1.0));
+  return 0.55 * rs + 0.45 * ars;
+}
+
+class _Det {
+  final List<List<double>> quads;
+  final double conf;
+  const _Det(this.quads, this.conf);
+}
+
+// بيجرّب طرق الكشف بالترتيب: أول نتيجة واثقة بيقف عندها (مفيش وقت زيادة)، ولو مفيش بيختار الأعلى ثقة
+_Det _detectBest(img.Image im) {
+  var best = <List<double>>[];
+  var bs = -1.0;
+  for (var k = 0; k < 5; k++) {
+    List<List<double>> qd;
+    try {
+      qd = k == 0
+          ? _detectReceipts(im, allowFull: false)
+          : (k == 4 ? _detectReceipts(im) : _detectReceipts(im, mode: k));
+    } catch (_) {
+      continue;
+    }
+    if (qd.isEmpty) continue;
+    var sc = 0.0;
+    for (final q in qd) {
+      sc += _quadScore(q, im.width, im.height);
+    }
+    sc /= qd.length;
+    if (sc >= 0.55) return _Det(qd, sc);
+    if (sc > bs) {
+      bs = sc;
+      best = qd;
+    }
+  }
+  return _Det(best, best.isEmpty ? 0.0 : bs);
+}
+
 // بيفرد الورقة (تعديل منظور) ويحسّنها: يشيل الظلال، يبيّض الخلفية، يغمّق الكتابة
 img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
@@ -4048,11 +4094,11 @@ List<String> _scanToPages(String src, String base) {
     if (im != null) {
       im = img.bakeOrientation(im);
       // الترابيزة الفاتحة بتخلّي الكشف الأول يعتبر الصورة كلها ورقة: نجرّب كل الطرق الأول، وبعدين نرجع للصورة كاملة
-      var quads = _detectReceipts(im, allowFull: false);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
-      if (quads.isEmpty) quads = _detectReceipts(im);
+      final det = _detectBest(im);
+      final quads = det.quads;
+      try {
+        File('${base}_conf').writeAsStringSync(det.conf.toStringAsFixed(3));
+      } catch (_) {}
       for (final q0 in quads) {
         final q = _extendForCaption(im, q0);
         final o = _warpAndEnhance(im, q);
@@ -4226,12 +4272,12 @@ Map<String, dynamic> _prepCrop(String src, String dst, List<List<double>>? saved
   File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 88));
   List<List<double>>? qs = saved;
   var auto = false;
+  var conf = 1.0;
   if (qs == null) {
     try {
-      var quads = _detectReceipts(im, allowFull: false);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 3);
+      final det = _detectBest(im);
+      conf = det.conf;
+      final quads = det.quads;
       if (quads.isNotEmpty) {
         final iw0 = im.width, ih0 = im.height;
         qs = <List<double>>[
@@ -4245,7 +4291,7 @@ Map<String, dynamic> _prepCrop(String src, String dst, List<List<double>>? saved
   qs ??= <List<double>>[
     [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
   ];
-  return <String, dynamic>{'w': im.width, 'h': im.height, 'qs': qs, 'auto': auto};
+  return <String, dynamic>{'w': im.width, 'h': im.height, 'qs': qs, 'auto': auto, 'conf': conf};
 }
 
 // بتشتغل في Isolate: المعاينة الحية للقص (نفس دالة الفرد والتحسين اللي بتتستخدم في الـ PDF)
@@ -4270,17 +4316,28 @@ Future<Map<String, dynamic>> prepCropAsync(String src, String dst, List<List<dou
 Future<List<Uint8List>> warpPreviewAsync(String path, List<List<double>> qs) =>
     Isolate.run(() => _warpPreview(path, qs));
 
+final Map<String, double> autoConf = <String, double>{}; // ثقة القص التلقائي لكل صورة (0..1)
+
 Future<List<String>> scanReceiptAsync(String src, {List<List<double>>? manual}) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
     final tag = manual == null
-        ? 'v7'
+        ? 'v8'
         : 'm${manual.expand((q) => q).map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
     final base = '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     if (manual != null) return await Isolate.run(() => _scanManual(src, base, manual));
-    return await Isolate.run(() => _scanToPages(src, base));
+    final res = await Isolate.run(() => _scanToPages(src, base));
+    try {
+      final cf = File('${base}_conf');
+      if (cf.existsSync()) {
+        autoConf[src] = double.tryParse(cf.readAsStringSync()) ?? 1.0;
+      } else if (res.isEmpty) {
+        autoConf[src] = 0.0;
+      }
+    } catch (_) {}
+    return res;
   } catch (_) {
     return <String>[];
   }
@@ -8719,6 +8776,22 @@ class _CropEditorState extends State<CropEditor> {
   ];
   int sel = 0; // الباتش المختار حاليًا
   bool loading = true, failed = false, autoFound = false, busy = false;
+  double conf = 1.0; // ثقة التحديد التلقائي
+  final List<List<List<double>>> _hist = <List<List<double>>>[]; // للتراجع
+
+  void _snap() {
+    _hist.add([for (final q in qs) List<double>.from(q)]);
+    if (_hist.length > 30) _hist.removeAt(0);
+  }
+
+  void _undo() {
+    if (_hist.isEmpty) return;
+    setState(() {
+      qs = _hist.removeLast();
+      if (sel >= qs.length) sel = 0;
+    });
+    _schedule();
+  }
   int drag = -1;
   int _seq = 0;
   List<Uint8List> outs = <Uint8List>[];
@@ -8845,6 +8918,7 @@ class _CropEditorState extends State<CropEditor> {
         ];
         sel = 0;
         autoFound = r['auto'] == true;
+        conf = (r['conf'] as num?)?.toDouble() ?? 1.0;
         loading = false;
       });
       _refreshPreview();
@@ -8865,7 +8939,7 @@ class _CropEditorState extends State<CropEditor> {
 
   Future<void> _refreshPreview() async {
     final p = prev;
-    if (p == null) return;
+    if (p == null || widget.inline) return; // جوه المراجعة مفيش معاينة سفلية: مفيش داعي نحسبها
     final qq = _sortQuads(qs);
     final my = ++_seq;
     setState(() => busy = true);
@@ -8879,6 +8953,7 @@ class _CropEditorState extends State<CropEditor> {
 
   void _addBatch() {
     if (qs.length >= 4) return;
+    _snap();
     // باتش جديد صغير في نص الصورة، وإنت تسحب أركانه
     setState(() {
       qs.add(<double>[0.35, 0.3, 0.65, 0.3, 0.35, 0.7, 0.65, 0.7]);
@@ -8889,6 +8964,7 @@ class _CropEditorState extends State<CropEditor> {
 
   void _removeBatch() {
     if (qs.length <= 1) return;
+    _snap();
     setState(() {
       qs.removeAt(sel);
       sel = 0;
@@ -8922,6 +8998,7 @@ class _CropEditorState extends State<CropEditor> {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onPanStart: (d) {
+          _snap();
           var bestB = -1, bestI = -1;
           var bd = 60.0;
           for (var b = 0; b < qs.length; b++) {
@@ -8935,10 +9012,39 @@ class _CropEditorState extends State<CropEditor> {
               }
             }
           }
+          if (bestB < 0) {
+            // مش على ركن: لو جوه إطار باتش نحرّكه كله
+            for (final b in <int>[sel, for (var k = 0; k < qs.length; k++) if (k != sel) k]) {
+              final xs = [for (var i = 0; i < 4; i++) pt(b, i).dx];
+              final ys = [for (var i = 0; i < 4; i++) pt(b, i).dy];
+              final lp = d.localPosition;
+              if (lp.dx >= xs.reduce(math.min) && lp.dx <= xs.reduce(math.max) &&
+                  lp.dy >= ys.reduce(math.min) && lp.dy <= ys.reduce(math.max)) {
+                drag = -2;
+                setState(() => sel = b);
+                return;
+              }
+            }
+          }
           drag = bestI;
           if (bestB >= 0) setState(() => sel = bestB);
         },
         onPanUpdate: (d) {
+          if (drag == -2) {
+            final q = qs[sel];
+            var dx = d.delta.dx / dw, dy = d.delta.dy / dh;
+            for (var i = 0; i < 4; i++) {
+              dx = dx < 0 ? math.max(dx, -q[2 * i]) : math.min(dx, 1.0 - q[2 * i]);
+              dy = dy < 0 ? math.max(dy, -q[2 * i + 1]) : math.min(dy, 1.0 - q[2 * i + 1]);
+            }
+            setState(() {
+              for (var i = 0; i < 4; i++) {
+                q[2 * i] += dx;
+                q[2 * i + 1] += dy;
+              }
+            });
+            return;
+          }
           if (drag < 0) return;
           setState(() {
             qs[sel][2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
@@ -8946,7 +9052,7 @@ class _CropEditorState extends State<CropEditor> {
           });
         },
         onPanEnd: (_) {
-          if (drag >= 0) _schedule();
+          if (drag >= 0 || drag == -2) _schedule();
           drag = -1;
         },
         child: Stack(children: [
@@ -9015,7 +9121,11 @@ class _CropEditorState extends State<CropEditor> {
                       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
                       child: Text(
                         autoFound
-                            ? 'اسحب الدواير على أركان الباتش. المعاينة تحت بتتحدّث لايف.'
+                            ? (conf < 0.55
+                                ? '⚠️ التحديد التلقائي مش واثق منه - راجع الأركان واسحبها.'
+                                : (widget.inline
+                                    ? 'اسحب الدواير على الأركان، أو اسحب من جوه الإطار علشان تحرّكه كله.'
+                                    : 'اسحب الدواير على أركان الباتش. المعاينة تحت بتتحدّث لايف.'))
                             : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير على أركانه.',
                         style: const TextStyle(fontSize: 12.5),
                       ),
@@ -9101,8 +9211,16 @@ class _CropEditorState extends State<CropEditor> {
                             icon: const Icon(Icons.call_merge),
                             label: const Text('ضم باتش من صورة تانية'),
                           ),
+                          OutlinedButton.icon(
+                            onPressed: _hist.isEmpty ? null : _undo,
+                            icon: const Icon(Icons.undo),
+                            label: const Text('تراجع'),
+                          ),
                           OutlinedButton(
-                            onPressed: () => _init(false),
+                            onPressed: () {
+                              _snap();
+                              _init(false);
+                            },
                             child: const Text('تلقائي'),
                           ),
                         ]),
@@ -9207,15 +9325,37 @@ class _ReviewPageState extends State<ReviewPage> {
   // الباتشات بعد القص اليدوي (لكل صورة): بتتعرض في المراجعة بدل الصورة الأصلية، وبتتحدّث أول ما تحفظ القص
   final Map<String, List<String>> _cropPages = <String, List<String>>{};
   bool showOrig = false;
+  final Set<String> _cvDone = <String>{}; // الباتشات اللي اتجرّب لها القص التلقائي
+  final Map<String, bool> _autoLow = <String, bool>{}; // التلقائي مش واثق منه
 
   ReceiptItem get item => widget.items[idx];
 
   Future<void> _loadCropView(String p) async {
     final mq = cropOf(p);
     if (mq == null) {
-      if (_cropPages.remove(p) != null && mounted) setState(() => rev++);
+      // تلقائي: للباتش المفتوح بس، في Isolate ومتكاشّي (نفس نتيجة الـ PDF)
+      if (_cvDone.contains(p)) return;
+      _cvDone.add(p);
+      try {
+        final l = await scanReceiptAsync(p);
+        if (!mounted) return;
+        _autoLow[p] = (autoConf[p] ?? 1.0) < 0.55;
+        if (l.isEmpty) {
+          setState(() {});
+          return;
+        }
+        for (final f in l) {
+          await FileImage(File(f)).evict();
+        }
+        _cropPages[p] = l;
+        setState(() {
+          showOrig = false;
+          rev++;
+        });
+      } catch (_) {}
       return;
     }
+    _autoLow.remove(p);
     try {
       final pages = <String>[];
       pages.addAll(await scanReceiptAsync(p, manual: mq));
@@ -9252,7 +9392,6 @@ class _ReviewPageState extends State<ReviewPage> {
     _pc = PageController(initialPage: idx);
     amt = TextEditingController();
     load();
-    _loadCropView(item.path);
   }
 
   @override
@@ -9266,7 +9405,7 @@ class _ReviewPageState extends State<ReviewPage> {
   void load() {
     amt.text = item.amount > 0 ? item.amount.toStringAsFixed(2) : '';
     order = item.orderNum;
-    if (!_cropPages.containsKey(item.path) && cropOf(item.path) != null) _loadCropView(item.path);
+    if (!_cropPages.containsKey(item.path)) _loadCropView(item.path);
   }
 
   void go(int i) {
@@ -9436,10 +9575,12 @@ class _ReviewPageState extends State<ReviewPage> {
       saveCrop(p, null);
       saveMerge(p, null);
       _cropPages.remove(p);
+      _cvDone.remove(p);
       setState(() {
         showOrig = false;
         rev++;
       });
+      _loadCropView(p); // يرجع للتلقائي
     } else {
       saveCrop(p, r.quads);
       saveMerge(p, r.merged);
@@ -9458,11 +9599,13 @@ class _ReviewPageState extends State<ReviewPage> {
     try {
       saveCrop(item.path, null); // التدوير بيغيّر اتجاه الصورة فالقص القديم مبقاش صالح
       _cropPages.remove(item.path);
+      _cvDone.remove(item.path);
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
       changed = true;
       setState(() => rev++);
+      _loadCropView(item.path);
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -9577,8 +9720,24 @@ class _ReviewPageState extends State<ReviewPage> {
               child: FilterChip(
                 selected: !showOrig,
                 avatar: Icon(showOrig ? Icons.image_outlined : Icons.crop, size: 16),
-                label: Text(showOrig ? 'الأصلي' : 'المقصوص ✓', style: const TextStyle(fontSize: 12)),
+                label: Text(
+                    showOrig
+                        ? 'الأصلي'
+                        : (cropOf(it.path) != null
+                            ? 'المقصوص ✓'
+                            : (_autoLow[it.path] == true ? 'تلقائي ⚠️ راجعه' : 'تلقائي ✓')),
+                    style: const TextStyle(fontSize: 12)),
                 onSelected: (_) => setState(() => showOrig = !showOrig),
+              ),
+            ),
+          if (!_cropPages.containsKey(it.path) && _autoLow[it.path] == true)
+            Positioned(
+              top: 4,
+              right: 4,
+              child: ActionChip(
+                avatar: const Icon(Icons.warning_amber, size: 16),
+                label: const Text('مش لاقي الباتش تلقائي - دوس قص', style: TextStyle(fontSize: 12)),
+                onPressed: cropBatch,
               ),
             ),
         ],
