@@ -1183,14 +1183,12 @@ Future<void> runAllScans() async {
         '• التقفيل: $hs\n'
         '• إيصالات الدفع: $ms\n'
         '⏱ الوقت المستغرق: ${fmtElapsed(chainSw.elapsed)}';
-    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
-      try {
-        await _chan.invokeMethod('notify', {
-          'title': tr('A2R POS - انتهى الفحص الشامل'),
-          'text': tr('$hs • $ms • ⏱ ${fmtElapsed(chainSw.elapsed)}')
-        });
-      } catch (_) {}
-    }
+    try {
+      await _chan.invokeMethod('notify', {
+        'title': tr('A2R POS - انتهى الفحص الشامل'),
+        'text': tr('$hs • $ms • ⏱ ${fmtElapsed(chainSw.elapsed)}')
+      });
+    } catch (_) {}
   }
 }
 
@@ -1304,8 +1302,14 @@ String? _findSysTidFuzzy(String text) {
   return null;
 }
 
-// استخراج احتمالات المبالغ في صورة السيستم (المبلغ المرتبط بـ EGP أولاً ثم أي مبالغ عشرية تانية)
+// استخراج احتمالات المبالغ في صورة السيستم (مع استبعاد التواريخ زي 19.11.2026)
 List<double> _sysCandidateAmounts(String text) {
+  // نشيل التواريخ والأوقات الأول علشان 19.11.2026 ما تتقراش 19.11 كمبلغ
+  final cleaned = text
+      .replaceAll(RegExp(r'(?<!\d)\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}(?!\d)'), ' ')
+      .replaceAll(RegExp(r'(?<!\d)20\d{2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?\d{1,2}(?!\d)'), ' ')
+      .replaceAll(RegExp(r'(?<!\d)\d{1,2}:\d{2}(?::\d{2})?(?!\d)'), ' ');
+
   final out = <double>[];
   void add(double? v) {
     if (v == null || v < 1 || v > 5000000) return;
@@ -1315,7 +1319,7 @@ List<double> _sysCandidateAmounts(String text) {
 
   final egpRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:[,. ]\d{3})+|\d+)[.,](\d{2})\s*E\s?G\s?[PRF]', caseSensitive: false);
   final egpVals = <double>[];
-  for (final m in egpRe.allMatches(text)) {
+  for (final m in egpRe.allMatches(cleaned)) {
     final v = double.tryParse('${m.group(1)!.replaceAll(RegExp(r'[,. ]'), '')}.${m.group(2)!}');
     if (v != null) egpVals.add(round2(v));
   }
@@ -1324,9 +1328,14 @@ List<double> _sysCandidateAmounts(String text) {
     add(v);
   }
 
-  final looseRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d{2,})[.,](\d{2})(?!\d)');
-  for (final m in looseRe.allMatches(text)) {
+  final looseRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d{2,})[.,](\d{2})(?![\d.])');
+  final looseVals = <double>[];
+  for (final m in looseRe.allMatches(cleaned)) {
     final v = double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}');
+    if (v != null) looseVals.add(round2(v));
+  }
+  looseVals.sort((a, b) => b.compareTo(a));
+  for (final v in looseVals) {
     add(v);
   }
   return out.take(5).toList();
@@ -7387,7 +7396,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final changed = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems)),
+      MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems, sysLineOf: _sysLineOf)),
     );
     if (changed == true) {
       await _refresh();
@@ -8127,7 +8136,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             padding: const EdgeInsets.only(top: 4),
             child: InkWell(
               borderRadius: BorderRadius.circular(12),
-              onTap: sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!),
+              onTap: sl.sys != null
+                  ? () => editSysTotal(sl.sys!)
+                  : (sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!)),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -8153,13 +8164,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (sys == null || sys.amount == null || diff == null) return null;
     final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
     final img = _sysImagePath(sys);
-    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true, imagePath: img);
+    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true, imagePath: img, sys: sys);
     return SysLine(
         '$head | ${_l(context, 'فرق', 'Gap')}: '
         '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
         '${diff.abs().toStringAsFixed(2)} ج.م',
         false,
-        imagePath: img);
+        imagePath: img,
+        sys: sys);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -8332,9 +8344,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         } catch (_) {}
       }
-      if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
-        setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
-      }
+
       if (autoScan) {
         await _watchService(true); // نفضل شغالين نراقب الإيصالات الجديدة
       } else if (!chainRunning) {
@@ -8345,7 +8355,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           await _chan.invokeMethod('keepScreenOn', {'on': false});
         } catch (_) {}
       }
-      if (!lite && _life != AppLifecycleState.resumed && !chainRunning) {
+      if (mounted && _isFinalScanStatus(status)) {
+        setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
+      }
+      if (!lite && !chainRunning) {
         final rv = processedItems.where((e) => e.needsReview).length + sysReads.where(_sysNeedsReview).length;
         final txt = 'تم فحص ${processedItems.length} إيصال'
             '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
@@ -8597,7 +8610,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               if (ct is String && !terminals.containsKey(ct)) hit = false;
             }
             if (hit && kind == 'console') {
-              if (ce['tid'] == null || ce['cands'] == null) hit = false;
+              final ca = (ce['amt'] as num?)?.toDouble();
+              final cd = ce['date'] as String?;
+              final amtLooksDate = ca != null && cd != null && (ca.toStringAsFixed(2) == cd || (ca < 32 && ce['man'] != true));
+              if (ce['tid'] == null || ce['cands'] == null || amtLooksDate) hit = false;
             }
             if (hit) {
               if (kind == 'console') {
@@ -9956,7 +9972,8 @@ class SysLine {
   final String text;
   final bool ok;
   final String? imagePath; // صورة السيستم (لو موجودة بيتفتح عند الضغط)
-  const SysLine(this.text, this.ok, {this.imagePath});
+  final SysTotal? sys; // كائن صورة السيستم لفتح شاشة المراجعة والتعديل
+  const SysLine(this.text, this.ok, {this.imagePath, this.sys});
 }
 
 class CropEditor extends StatefulWidget {
@@ -10841,7 +10858,18 @@ class _ReviewPageState extends State<ReviewPage> {
         Text(b, style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
       if (sl != null)
         InkWell(
-          onTap: sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!),
+          onTap: sl.sys != null
+              ? () async {
+                  final ok = await Navigator.push<bool>(
+                    context,
+                    MaterialPageRoute(builder: (_) => SysReviewPage(sys: sl.sys!, allItems: widget.allItems)),
+                  );
+                  if (ok == true && mounted) {
+                    changed = true;
+                    setState(() {});
+                  }
+                }
+              : (sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!)),
           child: Row(
             children: [
               Flexible(
@@ -14169,9 +14197,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           }
         } catch (_) {}
       }
-      if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
-        setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
-      }
+
       if (autoScan) {
         await _watchService(true); // نفضل شغالين نراقب الملفات الجديدة
       } else if (!chainRunning) {
@@ -14182,7 +14208,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           await _chan.invokeMethod('keepScreenOn', {'on': false});
         } catch (_) {}
       }
-      if (!lite && _life != AppLifecycleState.resumed && !chainRunning) {
+      if (mounted && _isFinalScanStatus(status)) {
+        setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
+      }
+      if (!lite && !chainRunning) {
         final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
         try {
           await _chan.invokeMethod('notify', {
