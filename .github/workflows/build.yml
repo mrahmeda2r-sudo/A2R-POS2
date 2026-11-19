@@ -91,6 +91,12 @@ jobs:
               private var pickResult: MethodChannel.Result? = null
               private var nativeChan: MethodChannel? = null
               private var pendingOpen: String? = null
+              private val dirObservers = HashMap<String, ArrayList<android.os.FileObserver>>()
+
+              override fun onDestroy() {
+                  for (k in ArrayList(dirObservers.keys)) stopWatchDirs(k)
+                  super.onDestroy()
+              }
 
               override fun onCreate(savedInstanceState: android.os.Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -215,6 +221,26 @@ jobs:
                               }
                               "moveToBack" -> {
                                   result.success(moveTaskToBack(true))
+                              }
+                              "watchDirs" -> {
+                                  val tag = call.argument<String>("tag") ?: "default"
+                                  val dirs = call.argument<List<String>>("dirs") ?: emptyList()
+                                  result.success(watchDirs(tag, dirs))
+                              }
+                              "stopWatchDirs" -> {
+                                  val tag = call.argument<String>("tag") ?: "default"
+                                  stopWatchDirs(tag)
+                                  result.success(true)
+                              }
+                              "nativeRedRemove" -> {
+                                  val src = call.argument<String>("src") ?: ""
+                                  val dst = call.argument<String>("dst") ?: ""
+                                  nativeRedRemove(src, dst, result)
+                              }
+                              "nativeEnhance" -> {
+                                  val src = call.argument<String>("src") ?: ""
+                                  val dst = call.argument<String>("dst") ?: ""
+                                  nativeEnhance(src, dst, result)
                               }
                               else -> result.notImplemented()
                           }
@@ -571,6 +597,136 @@ jobs:
                           n++
                       }
                       runOnUiThread { res.success(out) }
+                  }.start()
+              }
+
+              // ───────── مراقبة المجلدات لحظياً عبر FileObserver (أسرع وأخف على البطارية من Timer) ─────────
+              private fun watchDirs(tag: String, dirs: List<String>): Boolean {
+                  stopWatchDirs(tag)
+                  val list = ArrayList<android.os.FileObserver>()
+                  val mask = android.os.FileObserver.CLOSE_WRITE or
+                      android.os.FileObserver.MOVED_TO or
+                      android.os.FileObserver.CREATE
+                  for (d in dirs) {
+                      try {
+                          val f = File(d)
+                          if (!f.exists() || !f.isDirectory) continue
+                          val obs: android.os.FileObserver = if (Build.VERSION.SDK_INT >= 29) {
+                              object : android.os.FileObserver(f, mask) {
+                                  override fun onEvent(event: Int, path: String?) {
+                                      if (path != null && !path.startsWith(".")) {
+                                          runOnUiThread {
+                                              try { nativeChan?.invokeMethod("onDirChange", tag) } catch (_: Exception) {}
+                                          }
+                                      }
+                                  }
+                              }
+                          } else {
+                              @Suppress("DEPRECATION")
+                              object : android.os.FileObserver(d, mask) {
+                                  override fun onEvent(event: Int, path: String?) {
+                                      if (path != null && !path.startsWith(".")) {
+                                          runOnUiThread {
+                                              try { nativeChan?.invokeMethod("onDirChange", tag) } catch (_: Exception) {}
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          obs.startWatching()
+                          list.add(obs)
+                      } catch (_: Exception) {
+                      }
+                  }
+                  if (list.isNotEmpty()) dirObservers[tag] = list
+                  return list.isNotEmpty()
+              }
+
+              private fun stopWatchDirs(tag: String) {
+                  val old = dirObservers.remove(tag) ?: return
+                  for (obs in old) {
+                      try { obs.stopWatching() } catch (_: Exception) {}
+                  }
+              }
+
+              // ───────── إزالة اللون الأحمر وتحسين التباين عبر Android ColorMatrix (Skia Native) ─────────
+              private fun nativeRedRemove(src: String, dst: String, result: MethodChannel.Result) {
+                  Thread {
+                      var ok = false
+                      var bmp: android.graphics.Bitmap? = null
+                      var out: android.graphics.Bitmap? = null
+                      try {
+                          bmp = android.graphics.BitmapFactory.decodeFile(src)
+                          if (bmp != null) {
+                              out = android.graphics.Bitmap.createBitmap(bmp.width, bmp.height, android.graphics.Bitmap.Config.ARGB_8888)
+                              val canvas = android.graphics.Canvas(out)
+                              val paint = android.graphics.Paint()
+                              val cm = android.graphics.ColorMatrix(
+                                  floatArrayOf(
+                                      1f, 0f, 0f, 0f, 0f,
+                                      1f, 0f, 0f, 0f, 0f,
+                                      1f, 0f, 0f, 0f, 0f,
+                                      0f, 0f, 0f, 1f, 0f
+                                  )
+                              )
+                              paint.colorFilter = android.graphics.ColorMatrixColorFilter(cm)
+                              canvas.drawBitmap(bmp, 0f, 0f, paint)
+                              File(dst).outputStream().use { os ->
+                                  out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, os)
+                              }
+                              ok = true
+                          }
+                      } catch (_: Exception) {
+                      } finally {
+                          try { bmp?.recycle() } catch (_: Exception) {}
+                          try { out?.recycle() } catch (_: Exception) {}
+                      }
+                      runOnUiThread { result.success(ok) }
+                  }.start()
+              }
+
+              private fun nativeEnhance(src: String, dst: String, result: MethodChannel.Result) {
+                  Thread {
+                      var ok = false
+                      var bmp: android.graphics.Bitmap? = null
+                      var out: android.graphics.Bitmap? = null
+                      try {
+                          bmp = android.graphics.BitmapFactory.decodeFile(src)
+                          if (bmp != null) {
+                              val w = bmp.width
+                              val h = bmp.height
+                              val tw = if (w < 1800) (w * 1.6f).toInt() else if (w > 2600) 2200 else w
+                              val th = Math.max(1, (h.toLong() * tw / w).toInt())
+                              out = android.graphics.Bitmap.createBitmap(tw, th, android.graphics.Bitmap.Config.ARGB_8888)
+                              val canvas = android.graphics.Canvas(out)
+                              val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+                              val cm = android.graphics.ColorMatrix()
+                              cm.setSaturation(0f)
+                              val c = 1.6f
+                              val t = 128f * (1f - c)
+                              cm.postConcat(
+                                  android.graphics.ColorMatrix(
+                                      floatArrayOf(
+                                          c, 0f, 0f, 0f, t,
+                                          0f, c, 0f, 0f, t,
+                                          0f, 0f, c, 0f, t,
+                                          0f, 0f, 0f, 1f, 0f
+                                      )
+                                  )
+                              )
+                              paint.colorFilter = android.graphics.ColorMatrixColorFilter(cm)
+                              canvas.drawBitmap(bmp, null, android.graphics.Rect(0, 0, tw, th), paint)
+                              File(dst).outputStream().use { os ->
+                                  out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, os)
+                              }
+                              ok = true
+                          }
+                      } catch (_: Exception) {
+                      } finally {
+                          try { bmp?.recycle() } catch (_: Exception) {}
+                          try { out?.recycle() } catch (_: Exception) {}
+                      }
+                      runOnUiThread { result.success(ok) }
                   }.start()
               }
           }
