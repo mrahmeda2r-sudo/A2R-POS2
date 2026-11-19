@@ -158,8 +158,8 @@ jobs:
                                       if (nid == 7) nid = 8
                                       val alert = call.argument<Boolean>("alert") ?: false
                                       val openP = call.argument<String>("open")
-                                      val cid = if (alert) "pos_alert2" else "pos_ok2"
-                                      val cname = if (alert) "تنبيه مشاكل الفحص" else "نتيجة الفحص (هادي)"
+                                      val cid = if (alert) "pos_alert2" else "pos_ok3"
+                                      val cname = if (alert) "تنبيه مشاكل الفحص" else "نتيجة الفحص"
                                       nm.notify(nid, NotifHelper.build(this, cid, cname,
                                           call.argument<String>("title") ?: "A2R POS",
                                           call.argument<String>("text") ?: "", false, openP, nid))
@@ -758,9 +758,13 @@ jobs:
                               android.media.AudioAttributes.Builder()
                                   .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
                                   .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
-                      } else if (channelId == "pos_ok2") {
-                          ch.setSound(null, null)
-                          ch.enableVibration(false)
+                      } else if (channelId == "pos_ok3") {
+                          ch.enableVibration(true)
+                          ch.vibrationPattern = longArrayOf(0, 180)
+                          ch.setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,
+                              android.media.AudioAttributes.Builder()
+                                  .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                                  .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
                       }
                       nm.createNotificationChannel(ch)
                   }
@@ -781,7 +785,7 @@ jobs:
                   if (!ongoing) b.setStyle(Notification.BigTextStyle().bigText(text))
                   b.setOngoing(ongoing)
                   b.setAutoCancel(!ongoing)
-                  if (Build.VERSION.SDK_INT < 26 && channelId == "pos_alert2") b.setDefaults(Notification.DEFAULT_SOUND or Notification.DEFAULT_VIBRATE)
+                  if (Build.VERSION.SDK_INT < 26 && (channelId == "pos_alert2" || channelId == "pos_ok3")) b.setDefaults(Notification.DEFAULT_SOUND or Notification.DEFAULT_VIBRATE)
                   return b.build()
               }
           }
