@@ -10862,7 +10862,7 @@ class _ReviewPageState extends State<ReviewPage> {
               ? () async {
                   final ok = await Navigator.push<bool>(
                     context,
-                    MaterialPageRoute(builder: (_) => SysReviewPage(sys: sl.sys!, allItems: widget.allItems)),
+                    MaterialPageRoute(builder: (_) => SysReviewPage(sys: sl.sys!, allItems: widget.allItems ?? widget.items)),
                   );
                   if (ok == true && mounted) {
                     changed = true;
