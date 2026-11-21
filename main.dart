@@ -22,6 +22,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await appSettings.load();
   await prepareDefaultFiles();
+  migrateCountDefaultsV2();
   FlutterError.onError = (d) {
     _dbg('FLUTTER_ERROR ${d.exceptionAsString()}\n${(d.stack?.toString() ?? '').split('\n').take(8).join('\n')}');
     FlutterError.presentError(d);
@@ -447,9 +448,9 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
           radio('⚡ سريع متوازي (الأسرع - الافتراضي)', 'بيقرا صفحتين مع بعض من صور الـ PDF مباشرة', countEngine == 0, () => setCountEngine(0)),
           radio('سريع عادي', 'نفس السريع بس صفحة ورا صفحة (أخف على الذاكرة)', countEngine == 1, () => setCountEngine(1)),
           head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
-          radio('طريقة 3: تسلسل رأسي', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
+          radio('طريقة 3: تسلسل رأسي (الافتراضية)', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
           radio('طريقة 2: علامات الدفع بس', 'RRN / AMOUNT / Approved', countMethod == 2, () => setCountMethod(2)),
-          radio('طريقة 1: أكبر علامة (الافتراضية)', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
+          radio('طريقة 1: أكبر علامة', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
           head('إضافات (علّم على اللي عايزه)'),
           chk('تدقيق مزدوج لآخر صفحة', 'قراءة تانية بصورة محسّنة - أدق وأبطأ شوية', dualCount, (v) {
             dualCount = v;
@@ -1449,6 +1450,32 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt, String 
   }
   final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
   return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1], path: path, cands: cands);
+}
+
+// قراءة تانية معززة لصورة السيستم، بس لو القراءة الأولى ناقصها الترمنل أو المبلغ.
+// الصورة الكويسة متتكلفش حاجة (مفيش OCR إضافي)، والناقصة بتاخد قراءة محسّنة تكمّل الحقول الفاضية بس.
+Future<SysTotal> _sysSecondRead(SysTotal base, String imgPath, String enhPath, TextRecognizer rec) async {
+  if (base.tid != null && base.amount != null) return base;
+  try {
+    await enhanceImageAsync(imgPath, enhPath);
+    final res2 = await rec.processImage(InputImage.fromFilePath(enhPath));
+    final sp2 = parseSysConsole(res2.text, base.file, rt: res2, path: base.path);
+    if (sp2 == null) return base;
+    return SysTotal(
+      base.tid ?? sp2.tid,
+      base.amount ?? sp2.amount,
+      base.date ?? sp2.date,
+      base.printed.isNotEmpty ? base.printed : sp2.printed,
+      base.file,
+      txn: base.txn ?? sp2.txn,
+      txnAll: base.txnAll ?? sp2.txnAll,
+      path: base.path.isNotEmpty ? base.path : sp2.path,
+      cands: base.cands.isNotEmpty ? base.cands : sp2.cands,
+      manual: base.manual,
+    );
+  } catch (_) {
+    return base;
+  }
 }
 
 String _fmtMoney(double v) {
@@ -5748,22 +5775,24 @@ void setCountEngine(int e) {
   _saveCfgKey('countEngine', e);
 }
 
-// الطريقة اللي منها العدد المعروض: 3 = تسلسل رأسي (الأساسية) • 2 = علامات الدفع بس • 1 = أكبر علامة
-int countMethod = _loadIntCfg('countMethod', 1, 1, 3);
+// الطريقة اللي منها العدد المعروض: 3 = تسلسل رأسي (الأساسية والافتراضية) • 2 = علامات الدفع بس • 1 = أكبر علامة
+int countMethod = _loadIntCfg('countMethod', 3, 1, 3);
 void setCountMethod(int m) {
   countMethod = m;
   _saveCfgKey('countMethod', m);
 }
 
 // إعادة فحص الصفحات المشكوك فيها (إزالة الخط الأحمر + عدّ المستطيلات)
-bool redFixCount = _loadBoolCfg('redFixCount', false);
+// الافتراضي شغال: بيشتغل بس على الصفحات اللي طرق العد اختلفت فيها، فالملف السليم مبيعملش أي قراءة زيادة
+bool redFixCount = _loadBoolCfg('redFixCount', true);
 void setRedFixCount(bool v) {
   redFixCount = v;
   _saveCfgKey('redFixCount', v);
 }
 
 // حماية الزيادة: صفحة كاملة (مش آخر صفحة) عددها أكتر من باقي الصفحات بواحد والعلامات متفقة على العدد الأقل = الزيادة قراءة مكررة
-bool consensusGuard = _loadBoolCfg('consensusGuard', false);
+// الافتراضي شغال: حسابات بس على أرقام موجودة أصلاً، من غير أي OCR زيادة
+bool consensusGuard = _loadBoolCfg('consensusGuard', true);
 void setConsensusGuard(bool v) {
   consensusGuard = v;
   _saveCfgKey('consensusGuard', v);
@@ -5771,11 +5800,25 @@ void setConsensusGuard(bool v) {
 
 void resetCountDefaults() {
   setCountEngine(0);
-  setCountMethod(1);
-  setRedFixCount(false);
-  setConsensusGuard(false);
+  setCountMethod(3);
+  setRedFixCount(true);
+  setConsensusGuard(true);
   dualCount = false;
   _saveCfgKey('dualCount', false);
+}
+
+// ترقية لمرة واحدة (countFixV2): الافتراضيات الأدق بتتفعّل حتى لو كانت القيم القديمة محفوظة من نسخة أقدم.
+// لو المستخدم غيّر أي قيمة منهم بعد كده، اختياره بيتفضل محفوظ عادي.
+void migrateCountDefaultsV2() {
+  try {
+    final m = _readCfg();
+    if (m['countFixV2'] == true) return;
+    m['countMethod'] = 3;
+    m['redFixCount'] = true;
+    m['consensusGuard'] = true;
+    m['countFixV2'] = true;
+    _writeCfg(m);
+  } catch (_) {}
 }
 
 bool _loadDual() {
@@ -8671,9 +8714,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (ign != 'keep') {
             final sp = parseSysConsole(res.text, baseName(f.path), rt: res, path: f.path);
             if (sp != null) {
-              applySysFix(sp);
-              sysReads.add(sp);
-              _cachePut(fkey, {'k': 'console', ...sp.toJson()});
+              final spFull = stopReq ? sp : await _sysSecondRead(sp, f.path, '$tmpDir/w${wid}_sys_enh.jpg', recognizer);
+              applySysFix(spFull);
+              sysReads.add(spFull);
+              _cachePut(fkey, {'k': 'console', ...spFull.toJson()});
               tag = ' (صورة سيستم)';
               doneCount++;
               if (mounted) {
@@ -8707,6 +8751,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
 
           SysTotal? sysRot;
+          var sysRotSrc = f.path;
           if (!isReceipt && !skipPay && autoRotate) {
             for (final deg in const [0, 90, 270, 180]) {
               if (stopReq) break;
@@ -8719,6 +8764,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   final sp2 = parseSysConsole(r2.text, baseName(f.path), rt: r2, path: f.path);
                   if (sp2 != null) {
                     sysRot = sp2;
+                    sysRotSrc = tp;
                     break;
                   }
                 }
@@ -8736,9 +8782,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           if (stopReq) break;
           if (sysRot != null) {
-            applySysFix(sysRot);
-            sysReads.add(sysRot);
-            _cachePut(fkey, {'k': 'console', ...sysRot.toJson()});
+            final spFull = stopReq ? sysRot : await _sysSecondRead(sysRot, sysRotSrc, '$tmpDir/w${wid}_sys_enh.jpg', recognizer);
+            applySysFix(spFull);
+            sysReads.add(spFull);
+            _cachePut(fkey, {'k': 'console', ...spFull.toJson()});
             doneCount++;
             if (mounted) {
               setState(() {
