@@ -5722,21 +5722,172 @@ String sourceIdentity(String path) {
 }
 
 dynamic _cropValueForPath(String path, Map<String, dynamic> store) {
-  final bound = store['path:$path'];
+  final id = sourceIdentity(path),
+      bound = store['path:$path'],
+      named = store[baseName(path)];
+  if (bound is Map && bound['source'] == id) return bound;
+  if (named is Map &&
+      named['source'] == id &&
+      (named['path'] == null || named['path'] == path))
+    return named;
+  final shared = store['image:$id'];
+  if (shared is Map) {
+    final other = shared['path'];
+    final liveCopy =
+        other is String &&
+        other != path &&
+        File(other).existsSync() &&
+        sourceIdentity(other) == id;
+    if (!liveCopy) return shared;
+  } else if (shared != null)
+    return shared;
   if (bound != null) return bound;
-  final named = store[baseName(path)];
   if (named != null &&
       (named is! Map || named['path'] == null || named['path'] == path))
     return named;
-  final shared = store['image:${sourceIdentity(path)}'];
-  // Identical photos that both still exist are separate review choices.
-  // A content-key fallback is for a renamed source, not another live copy.
-  if (shared is Map &&
-      shared['path'] is String &&
-      shared['path'] != path &&
-      File(shared['path'] as String).existsSync())
+  return null;
+}
+
+// A full byte comparison is used at replacement, not a timestamp or sampled hash.
+bool sameReceiptFileBytes(String a, String b) {
+  RandomAccessFile? x, y;
+  try {
+    if (a == b) return File(a).existsSync();
+    if (!File(a).existsSync() || !File(b).existsSync()) return false;
+    x = File(a).openSync();
+    y = File(b).openSync();
+    if (x.lengthSync() != y.lengthSync()) return false;
+    while (true) {
+      final p = x.readSync(65536), q = y.readSync(65536);
+      if (p.length != q.length) return false;
+      if (p.isEmpty) return true;
+      for (var i = 0; i < p.length; i++) {
+        if (p[i] != q[i]) return false;
+      }
+    }
+  } catch (_) {
+    return false;
+  } finally {
+    try {
+      x?.closeSync();
+    } catch (_) {}
+    try {
+      y?.closeSync();
+    } catch (_) {}
+  }
+}
+
+void bindMovedCropRecord(
+  Map raw,
+  String path, {
+  Map<String, String> names = const {},
+}) {
+  try {
+    if (raw['source'] != sourceIdentity(path)) return;
+    final m = _loadCrops();
+    final v = Map<String, dynamic>.from(raw)
+      ..['path'] = path
+      ..['modified'] = File(path).statSync().modified.microsecondsSinceEpoch;
+    if (v['merges'] is List)
+      v['merges'] = [
+        for (final n in v['merges']) names[n.toString()] ?? n.toString(),
+      ];
+    m[baseName(path)] = v;
+    m['path:$path'] = v;
+    m['image:${v['source']}'] = v;
+    final f = File('$cropStorePath.tmp')..createSync(recursive: true);
+    f.writeAsStringSync(jsonEncode(m), flush: true);
+    f.renameSync(cropStorePath);
+    cropRev.value++;
+  } catch (_) {}
+}
+
+Map? recoverableCropRecord(String path) {
+  try {
+    final raw = _cropValueForPath(path, _loadCrops());
+    if (raw is Map &&
+        raw['source'] == sourceIdentity(path) &&
+        raw['v'] == kCropVersion &&
+        raw['mode'] == 'manual' &&
+        _readCropQuads(raw['quads']) != null)
+      return raw;
+  } catch (_) {}
+  return null;
+}
+
+List<String> recoverableManualPages(String path) {
+  final raw = recoverableCropRecord(path);
+  if (raw == null || raw['pages'] is! List) return [];
+  final out = <String>[];
+  for (final v in raw['pages']) {
+    if (v is! Map || v['path'] is! String) return [];
+    final p = v['path'] as String;
+    if (!_savedScanFile(p) ||
+        sourceIdentity(p) != v['identity'] ||
+        File(p).statSync().modified.microsecondsSinceEpoch != v['modified'])
+      return [];
+    out.add(p);
+  }
+  return out.length == _readCropQuads(raw['quads'])!.length ? out : <String>[];
+}
+
+bool restoreSavedManualSelection(String path) {
+  final raw = recoverableCropRecord(path), pages = recoverableManualPages(path);
+  if (raw == null || pages.isEmpty) return false;
+  return saveCrop(
+    path,
+    _readCropQuads(raw['quads']),
+    pages: pages,
+    mergeNames: raw['merges'] is List
+        ? [for (final n in raw['merges']) n.toString()]
+        : <String>[],
+    turns: (raw['turns'] as int?) ?? 0,
+  );
+}
+
+List<double>? orderManualCropPoints(List<Offset> points) {
+  if (points.length != 4 ||
+      points.any(
+        (p) =>
+            !p.dx.isFinite ||
+            !p.dy.isFinite ||
+            p.dx < 0 ||
+            p.dx > 1 ||
+            p.dy < 0 ||
+            p.dy > 1,
+      ))
     return null;
-  return shared;
+  for (var i = 0; i < 4; i++)
+    for (var j = i + 1; j < 4; j++)
+      if ((points[i] - points[j]).distance < .02) return null;
+  final cx = points.fold<double>(0, (a, p) => a + p.dx) / 4,
+      cy = points.fold<double>(0, (a, p) => a + p.dy) / 4;
+  final p = List<Offset>.from(points)
+    ..sort(
+      (a, b) => math
+          .atan2(a.dy - cy, a.dx - cx)
+          .compareTo(math.atan2(b.dy - cy, b.dx - cx)),
+    );
+  for (var i = 0; i < 4; i++) {
+    final a = p[i], b = p[(i + 1) % 4], c = p[(i + 2) % 4];
+    if ((b.dx - a.dx) * (c.dy - b.dy) - (b.dy - a.dy) * (c.dx - b.dx) <= .00001)
+      return null;
+  }
+  var start = 0;
+  for (var i = 1; i < 4; i++)
+    if (p[i].dx + p[i].dy < p[start].dx + p[start].dy) start = i;
+  final v = [for (var i = 0; i < 4; i++) p[(start + i) % 4]];
+  final q = <double>[
+    v[0].dx,
+    v[0].dy,
+    v[1].dx,
+    v[1].dy,
+    v[3].dx,
+    v[3].dy,
+    v[2].dx,
+    v[2].dy,
+  ];
+  return safeCropQuad(q, 1, 1) ? q : null;
 }
 
 Map? cropRecord(String path) {
@@ -5781,6 +5932,7 @@ bool saveCrop(
   bool original = false,
   List<String>? pages,
   List<String>? mergeNames,
+  int turns = 0,
 }) {
   try {
     final m = _loadCrops();
@@ -5807,6 +5959,7 @@ bool saveCrop(
         'source': sourceIdentity(path),
         'modified': File(path).statSync().modified.microsecondsSinceEpoch,
         'mode': original ? 'original' : 'manual',
+        'turns': turns % 4,
         'path': path,
         if (mergeNames != null) 'merges': List<String>.from(mergeNames),
         'quads': qs,
@@ -6098,22 +6251,25 @@ Map<String, dynamic> _loadMerges() {
       jsonDecode(File(mergeStorePath).readAsStringSync()) as Map,
     );
   } catch (_) {}
-  for (final raw in _loadCrops().values) {
-    if (raw is! Map || raw['path'] is! String || raw['merges'] is! List)
-      continue;
-    final path = raw['path'] as String;
+  final crops = _loadCrops();
+  final paths = {
+    for (final v in crops.values)
+      if (v is Map && v['path'] is String) v['path'] as String,
+  };
+  for (final path in paths) {
+    final raw = _cropValueForPath(path, crops);
+    if (raw is! Map || raw['merges'] is! List) continue;
     final name = baseName(path);
     if (!File(path).existsSync() ||
         raw['source'] != sourceIdentity(path) ||
         raw['v'] != kCropVersion ||
         raw['modified'] !=
-            File(path).statSync().modified.microsecondsSinceEpoch) {
+            File(path).statSync().modified.microsecondsSinceEpoch)
       result.remove(name);
-    } else if ((raw['merges'] as List).isEmpty) {
+    else if ((raw['merges'] as List).isEmpty)
       result.remove(name);
-    } else {
+    else
       result[name] = List.from(raw['merges']);
-    }
   }
   return result;
 }
@@ -6164,7 +6320,13 @@ class CropResult {
   final List<List<double>>? quads; // null + clear = مسح القص اليدوي
   final List<String> merged; // أسماء ملفات الصور المضمومة
   final bool clear;
-  const CropResult(this.quads, this.merged, {this.clear = false});
+  final int turns;
+  const CropResult(
+    this.quads,
+    this.merged, {
+    this.clear = false,
+    this.turns = 0,
+  });
 }
 
 // شمال لليمين (زي ترتيب الباتشات في الـ PDF)
@@ -6180,7 +6342,12 @@ List<List<double>> _sortQuads(List<List<double>> qs) {
 }
 
 // بتشتغل في Isolate: قص يدوي بالأركان اللي المستخدم حددها (صفحة لكل باتش)
-List<String> _scanManual(String src, String base, List<List<double>> qs) {
+List<String> _scanManual(
+  String src,
+  String base,
+  List<List<double>> qs, [
+  int turns = 0,
+]) {
   try {
     final cached = <String>[];
     while (File('${base}_${cached.length}.jpg').existsSync()) {
@@ -6190,6 +6357,7 @@ List<String> _scanManual(String src, String base, List<List<double>> qs) {
     var im = img.decodeImage(File(src).readAsBytesSync());
     if (im == null) return <String>[];
     im = img.bakeOrientation(im);
+    if (turns % 4 != 0) im = img.copyRotate(im, angle: (turns % 4) * 90);
     final w = im.width.toDouble(), h = im.height.toDouble();
     final out = <String>[];
     for (var k = 0; k < qs.length; k++) {
@@ -6294,6 +6462,7 @@ Future<List<String>> scanReceiptAsync(
   String src, {
   List<List<double>>? manual,
   bool userRequested = false,
+  int turns = 0,
 }) async {
   if (!userRequested) {
     final selected = pdfImageSelection(src);
@@ -6308,7 +6477,7 @@ Future<List<String>> scanReceiptAsync(
   final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
   final base =
       '$baseDir/.manual_scans/m10_${DateTime.now().microsecondsSinceEpoch}_${++_manualScanSerial}_$safe';
-  final pages = await Isolate.run(() => _scanManual(src, base, manual));
+  final pages = await Isolate.run(() => _scanManual(src, base, manual, turns));
   if (pages.length != manual.length ||
       !pages.every(_savedScanFile) ||
       sourceIdentity(src) != before ||
@@ -11743,6 +11912,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // ═════════ المرحلة 3: إعادة التسمية (على مرحلتين عشان التعارض) ═════════
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
+    final cropBindings = <ReceiptItem, Map>{
+      for (final r in kept)
+        if (cropRecord(r.path) != null)
+          r: Map<String, dynamic>.from(cropRecord(r.path)!),
+    };
+    final cropOldNames = {for (final r in kept) r: baseName(r.path)};
     final moves = <ReceiptItem>[];
     final newNames = <ReceiptItem, String>{};
     var dupN = 0;
@@ -11768,11 +11943,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final r in moves) {
       try {
         final dst = newNames[r]!;
-        if (File(dst).existsSync()) File(dst).deleteSync();
-        r.path = File(r.path).renameSync(dst).path;
+        if (File(dst).existsSync() && sameReceiptFileBytes(r.path, dst)) {
+          final redundant = r.path;
+          r.path = dst;
+          try {
+            File(redundant).deleteSync();
+          } catch (_) {}
+        } else {
+          if (File(dst).existsSync()) File(dst).deleteSync();
+          r.path = File(r.path).renameSync(dst).path;
+        }
       } catch (_) {}
     }
 
+    final movedCropNames = {
+      for (final r in kept) cropOldNames[r]!: baseName(r.path),
+    };
+    for (final e in cropBindings.entries)
+      bindMovedCropRecord(e.value, e.key.path, names: movedCropNames);
     for (final r in kept) {
       if (fixes.containsKey(r.key) ||
           fixes.containsKey('image:${sourceIdentity(r.path)}'))
@@ -13001,6 +13189,14 @@ class CropEditor extends StatefulWidget {
 
 class _CropEditorState extends State<CropEditor> {
   String err = '';
+  bool _tapMode = true;
+  final List<Offset> _tapPoints = [];
+  List<int> _tapLabels = [1, 2, 4, 3];
+  String _tapError = '';
+  int _pendingTurns = 0, _previewSerial = 0;
+  final TransformationController _cropTransform = TransformationController();
+  final List<String> _previewTemps = [];
+  Uint8List? _previewBytes;
   String? prev;
   double iw = 1, ih = 1;
   List<List<double>> qs = <List<double>>[List<double>.from(kFullQuad)];
@@ -13131,6 +13327,12 @@ class _CropEditorState extends State<CropEditor> {
   @override
   void dispose() {
     _t?.cancel();
+    _cropTransform.dispose();
+    for (final p in _previewTemps) {
+      try {
+        File(p).deleteSync();
+      } catch (_) {}
+    }
     super.dispose();
   }
 
@@ -13141,16 +13343,33 @@ class _CropEditorState extends State<CropEditor> {
     });
     try {
       Directory('$baseDir/.scans').createSync(recursive: true);
-      final src = widget.path;
+      final record = useSaved
+          ? (cropRecord(widget.path) ?? recoverableCropRecord(widget.path))
+          : null;
+      final saved = useSaved ? _readCropQuads(record?['quads']) : null;
+      if (useSaved) _pendingTurns = (record?['turns'] as int?) ?? 0;
+      var src = widget.path;
+      final previewId = '${identityHashCode(this)}_${++_previewSerial}';
+      if (_pendingTurns % 4 != 0) {
+        src = '$baseDir/.scans/rot_$previewId.jpg';
+        await fixImageAsync(widget.path, src, (_pendingTurns % 4) * 90);
+        _previewTemps.add(src);
+      }
       final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
       final st = File(src).statSync();
-      final dst = '$baseDir/.scans/cp_${safe}_${st.size}.jpg';
-      final saved = useSaved ? cropOf(src) : null;
-      final r = await prepCropAsync(src, dst, saved);
+      final dst = '$baseDir/.scans/cp_${safe}_${st.size}_$previewId.jpg';
+      _previewTemps.add(dst);
+      final r = await prepCropAsync(
+        src,
+        dst,
+        saved ?? [List<double>.from(kFullQuad)],
+      );
       if (!mounted) return;
-      await FileImage(File(dst)).evict();
+      final previewBytes = File(dst).readAsBytesSync();
+      await precacheImage(MemoryImage(previewBytes), context);
+      if (!mounted) return;
       if (useSaved) {
-        final names = mergeOf(src);
+        final names = mergeOf(widget.path);
         merged = [
           for (final n in names)
             for (final c in widget.cands)
@@ -13163,6 +13382,12 @@ class _CropEditorState extends State<CropEditor> {
       if (!mounted) return;
       setState(() {
         prev = dst;
+        _previewBytes = previewBytes;
+        _tapMode = saved == null;
+        _tapPoints.clear();
+        _tapLabels = [1, 2, 4, 3];
+        _tapError = '';
+        _cropTransform.value = Matrix4.identity();
         iw = (r['w'] as int).toDouble();
         ih = (r['h'] as int).toDouble();
         qs = [
@@ -13210,8 +13435,12 @@ class _CropEditorState extends State<CropEditor> {
     _snap();
     // باتش جديد صغير في نص الصورة، وإنت تسحب أركانه
     setState(() {
-      qs.add(<double>[0.35, 0.3, 0.65, 0.3, 0.35, 0.7, 0.65, 0.7]);
+      qs.add(List<double>.from(kFullQuad));
       sel = qs.length - 1;
+      _tapMode = true;
+      _tapPoints.clear();
+      _tapError = '';
+      _cropTransform.value = Matrix4.identity();
     });
     _schedule();
   }
@@ -13222,22 +13451,78 @@ class _CropEditorState extends State<CropEditor> {
     setState(() {
       qs.removeAt(sel);
       sel = 0;
+      _tapMode = false;
+      _tapPoints.clear();
+      _tapError = '';
+      _tapLabels = [1, 2, 4, 3];
+      _cropTransform.value = Matrix4.identity();
     });
     _schedule();
   }
 
-  // تدوير الصورة نفسها 90° (القص القديم بيتمسح لأن اتجاه الصورة اتغيّر)
+  // Draft rotation only. Cancel leaves source and its saved selection untouched.
   Future<void> _rotate() async {
-    try {
-      saveCrop(widget.path, null);
-      await fixImageAsync(widget.path, widget.path, 90);
-      await FileImage(File(widget.path)).evict();
-      imageCache.clear();
-      await _init(false);
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('مقدرتش أدوّر الصورة.')));
+    _pendingTurns = (_pendingTurns + 1) % 4;
+    await _init(false);
+  }
+
+  void _restartTap() {
+    _snap();
+    setState(() {
+      _tapMode = true;
+      _tapPoints.clear();
+      _tapError = '';
+      _cropTransform.value = Matrix4.identity();
+    });
+  }
+
+  void _fullTap() {
+    _snap();
+    setState(() {
+      qs[sel] = List<double>.from(kFullQuad);
+      _tapMode = false;
+      _tapPoints.clear();
+      _tapLabels = [1, 2, 4, 3];
+      _tapError = '';
+      _cropTransform.value = Matrix4.identity();
+    });
+    _schedule();
+  }
+
+  void _addTap(Offset p) {
+    if (_tapPoints.any((a) => (a - p).distance < .02)) {
+      setState(
+        () => _tapError = 'النقطة قريبة من نقطة موجودة. اختار زاوية تانية.',
+      );
+      return;
+    }
+    setState(() {
+      _tapPoints.add(p);
+      _tapError = '';
+    });
+    if (_tapPoints.length == 4) {
+      final q = orderManualCropPoints(_tapPoints);
+      if (q == null) {
+        setState(() {
+          _tapPoints.removeLast();
+          _tapError = 'النقطة الأخيرة مش بتكمل إطار صالح. جرّب الزاوية تاني.';
+        });
+        return;
+      }
+      _snap();
+      setState(() {
+        qs[sel] = q;
+        _tapLabels = [
+          for (var i = 0; i < 4; i++)
+            _tapPoints.indexWhere(
+                  (p) => (p - Offset(q[i * 2], q[i * 2 + 1])).distance < .00001,
+                ) +
+                1,
+        ];
+        _tapMode = false;
+        _cropTransform.value = Matrix4.identity();
+      });
+      _schedule();
     }
   }
 
@@ -13245,163 +13530,232 @@ class _CropEditorState extends State<CropEditor> {
   Widget build(BuildContext context) {
     final editor = LayoutBuilder(
       builder: (c, box) {
-        final sc = math.min(box.maxWidth / iw, box.maxHeight / ih);
+        final sc = math.min(
+          math.max(1.0, box.maxWidth - 36) / iw,
+          math.max(1.0, box.maxHeight - 36) / ih,
+        );
         final dw = iw * sc, dh = ih * sc;
         final ox = (box.maxWidth - dw) / 2, oy = (box.maxHeight - dh) / 2;
         Offset pt(int b, int i) =>
             Offset(ox + qs[b][2 * i] * dw, oy + qs[b][2 * i + 1] * dh);
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onPanStart: (d) {
-            _snap();
-            var bestB = -1, bestI = -1;
-            var bd = 60.0;
-            for (var b = 0; b < qs.length; b++) {
-              for (var i = 0; i < 4; i++) {
-                final dd = (pt(b, i) - d.localPosition).distance;
-                // لو دايرتين متقاربين نفضّل الباتش المختار
-                if (dd < bd || (dd == bd && b == sel)) {
-                  bd = dd;
-                  bestB = b;
-                  bestI = i;
-                }
-              }
-            }
-            if (bestB < 0) {
-              // مش على ركن: لو جوه إطار باتش نحرّكه كله
-              for (final b in <int>[
-                sel,
-                for (var k = 0; k < qs.length; k++)
-                  if (k != sel) k,
-              ]) {
-                final xs = [for (var i = 0; i < 4; i++) pt(b, i).dx];
-                final ys = [for (var i = 0; i < 4; i++) pt(b, i).dy];
-                final lp = d.localPosition;
-                if (lp.dx >= xs.reduce(math.min) &&
-                    lp.dx <= xs.reduce(math.max) &&
-                    lp.dy >= ys.reduce(math.min) &&
-                    lp.dy <= ys.reduce(math.max)) {
-                  drag = -2;
-                  setState(() => sel = b);
-                  return;
-                }
-              }
-            }
-            drag = bestI;
-            if (bestB >= 0) setState(() => sel = bestB);
-          },
-          onPanUpdate: (d) {
-            if (drag == -2) {
-              final q = qs[sel];
-              var dx = d.delta.dx / dw, dy = d.delta.dy / dh;
-              for (var i = 0; i < 4; i++) {
-                dx = dx < 0
-                    ? math.max(dx, -q[2 * i])
-                    : math.min(dx, 1.0 - q[2 * i]);
-                dy = dy < 0
-                    ? math.max(dy, -q[2 * i + 1])
-                    : math.min(dy, 1.0 - q[2 * i + 1]);
-              }
-              setState(() {
-                for (var i = 0; i < 4; i++) {
-                  q[2 * i] += dx;
-                  q[2 * i + 1] += dy;
-                }
-              });
-              return;
-            }
-            if (drag < 0) return;
-            setState(() {
-              qs[sel][2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
-              qs[sel][2 * drag + 1] = _cd(
-                (d.localPosition.dy - oy) / dh,
-                0.0,
-                1.0,
-              );
-            });
-          },
-          onPanEnd: (_) {
-            if (drag >= 0 || drag == -2) _schedule();
-            drag = -1;
-          },
-          child: Stack(
-            children: [
-              Positioned(
-                left: ox,
-                top: oy,
-                width: dw,
-                height: dh,
-                child: Image.file(
-                  File(prev!),
-                  fit: BoxFit.fill,
-                  gaplessPlayback: true,
-                ),
-              ),
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _CropPainter([
-                    for (var b = 0; b < qs.length; b++)
-                      [for (var i = 0; i < 4; i++) pt(b, i)],
-                  ], sel),
-                ),
-              ),
-              // عدسة: بتكبّر المنطقة تحت صباعك وإنت بتسحب الركن (بتتحط في الجنب البعيد عن الصباع)
-              if (drag >= 0)
-                Builder(
-                  builder: (_) {
-                    const ls = 120.0, zoom = 3.0;
-                    final fp = pt(sel, drag);
-                    final left = fp.dx < box.maxWidth / 2
-                        ? box.maxWidth - ls - 8
-                        : 8.0;
-                    final top = fp.dy < box.maxHeight / 2
-                        ? box.maxHeight - ls - 8
-                        : 8.0;
-                    return Positioned(
-                      left: left,
-                      top: top,
-                      width: ls,
-                      height: ls,
+        return InteractiveViewer(
+          transformationController: _cropTransform,
+          minScale: 1,
+          maxScale: 5,
+          panEnabled: _tapMode,
+          scaleEnabled: _tapMode,
+          child: SizedBox(
+            width: box.maxWidth,
+            height: box.maxHeight,
+            child: GestureDetector(
+              key: const ValueKey('manual-crop-surface'),
+              behavior: HitTestBehavior.opaque,
+              onTapUp: _tapMode
+                  ? (d) {
+                      final x = (d.localPosition.dx - ox) / dw,
+                          y = (d.localPosition.dy - oy) / dh;
+                      if (x >= 0 && x <= 1 && y >= 0 && y <= 1)
+                        _addTap(Offset(x, y));
+                    }
+                  : null,
+              onPanStart: _tapMode
+                  ? null
+                  : (d) {
+                      _tapPoints.clear();
+                      _snap();
+                      var bestB = -1, bestI = -1;
+                      var bd = 60.0;
+                      for (var b = 0; b < qs.length; b++) {
+                        for (var i = 0; i < 4; i++) {
+                          final dd = (pt(b, i) - d.localPosition).distance;
+                          // لو دايرتين متقاربين نفضّل الباتش المختار
+                          if (dd < bd || (dd == bd && b == sel)) {
+                            bd = dd;
+                            bestB = b;
+                            bestI = i;
+                          }
+                        }
+                      }
+                      if (bestB < 0) {
+                        // مش على ركن: لو جوه إطار باتش نحرّكه كله
+                        for (final b in <int>[
+                          sel,
+                          for (var k = 0; k < qs.length; k++)
+                            if (k != sel) k,
+                        ]) {
+                          final xs = [for (var i = 0; i < 4; i++) pt(b, i).dx];
+                          final ys = [for (var i = 0; i < 4; i++) pt(b, i).dy];
+                          final lp = d.localPosition;
+                          if (lp.dx >= xs.reduce(math.min) &&
+                              lp.dx <= xs.reduce(math.max) &&
+                              lp.dy >= ys.reduce(math.min) &&
+                              lp.dy <= ys.reduce(math.max)) {
+                            drag = -2;
+                            setState(() => sel = b);
+                            return;
+                          }
+                        }
+                      }
+                      drag = bestI;
+                      if (bestB >= 0) setState(() => sel = bestB);
+                    },
+              onPanUpdate: _tapMode
+                  ? null
+                  : (d) {
+                      if (drag == -2) {
+                        final q = qs[sel];
+                        var dx = d.delta.dx / dw, dy = d.delta.dy / dh;
+                        for (var i = 0; i < 4; i++) {
+                          dx = dx < 0
+                              ? math.max(dx, -q[2 * i])
+                              : math.min(dx, 1.0 - q[2 * i]);
+                          dy = dy < 0
+                              ? math.max(dy, -q[2 * i + 1])
+                              : math.min(dy, 1.0 - q[2 * i + 1]);
+                        }
+                        setState(() {
+                          for (var i = 0; i < 4; i++) {
+                            q[2 * i] += dx;
+                            q[2 * i + 1] += dy;
+                          }
+                        });
+                        return;
+                      }
+                      if (drag < 0) return;
+                      setState(() {
+                        qs[sel][2 * drag] = _cd(
+                          (d.localPosition.dx - ox) / dw,
+                          0.0,
+                          1.0,
+                        );
+                        qs[sel][2 * drag + 1] = _cd(
+                          (d.localPosition.dy - oy) / dh,
+                          0.0,
+                          1.0,
+                        );
+                      });
+                    },
+              onPanEnd: _tapMode
+                  ? null
+                  : (_) {
+                      if (drag >= 0 || drag == -2) _schedule();
+                      drag = -1;
+                    },
+              child: Stack(
+                children: [
+                  Positioned(
+                    left: ox,
+                    top: oy,
+                    width: dw,
+                    height: dh,
+                    child: Image.memory(
+                      _previewBytes!,
+                      fit: BoxFit.fill,
+                      gaplessPlayback: true,
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _CropPainter(
+                        [
+                          for (var b = 0; b < qs.length; b++)
+                            [for (var i = 0; i < 4; i++) pt(b, i)],
+                        ],
+                        sel,
+                        hideSelected: _tapMode,
+                        labels: _tapLabels,
+                        colors: Theme.of(context).colorScheme,
+                        labelStyle: Theme.of(context).textTheme.labelLarge!
+                            .copyWith(
+                              color: Theme.of(context).colorScheme.onPrimary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                    ),
+                  ),
+                  if (_tapMode)
+                    Positioned.fill(
                       child: IgnorePointer(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Colors.blueAccent,
-                              width: 3,
+                        child: CustomPaint(
+                          painter: _TapPointsPainter(
+                            [
+                              for (final p in _tapPoints)
+                                Offset(ox + p.dx * dw, oy + p.dy * dh),
+                            ],
+                            Theme.of(context).textTheme.labelLarge!.copyWith(
+                              color: Theme.of(context).colorScheme.onPrimary,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
                             ),
-                            color: Colors.black,
-                          ),
-                          child: ClipOval(
-                            child: Stack(
-                              children: [
-                                Positioned(
-                                  left: ls / 2 - (fp.dx - ox) * zoom,
-                                  top: ls / 2 - (fp.dy - oy) * zoom,
-                                  width: dw * zoom,
-                                  height: dh * zoom,
-                                  child: Image.file(
-                                    File(prev!),
-                                    fit: BoxFit.fill,
-                                    gaplessPlayback: true,
-                                  ),
-                                ),
-                                const Center(
-                                  child: Icon(
-                                    Icons.add,
-                                    color: Colors.redAccent,
-                                    size: 22,
-                                  ),
-                                ),
-                              ],
-                            ),
+                            Theme.of(context).colorScheme,
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
-            ],
+                    ),
+                  // عدسة: بتكبّر المنطقة تحت صباعك وإنت بتسحب الركن (بتتحط في الجنب البعيد عن الصباع)
+                  if (drag >= 0)
+                    Builder(
+                      builder: (_) {
+                        const ls = 120.0, zoom = 3.0;
+                        final fp = pt(sel, drag);
+                        final left = fp.dx < box.maxWidth / 2
+                            ? box.maxWidth - ls - 8
+                            : 8.0;
+                        final top = fp.dy < box.maxHeight / 2
+                            ? box.maxHeight - ls - 8
+                            : 8.0;
+                        return Positioned(
+                          left: left,
+                          top: top,
+                          width: ls,
+                          height: ls,
+                          child: IgnorePointer(
+                            child: Container(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  width: 3,
+                                ),
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .surfaceContainerHighest,
+                              ),
+                              child: ClipOval(
+                                child: Stack(
+                                  children: [
+                                    Positioned(
+                                      left: ls / 2 - (fp.dx - ox) * zoom,
+                                      top: ls / 2 - (fp.dy - oy) * zoom,
+                                      width: dw * zoom,
+                                      height: dh * zoom,
+                                      child: Image.memory(
+                                        _previewBytes!,
+                                        fit: BoxFit.fill,
+                                        gaplessPlayback: true,
+                                      ),
+                                    ),
+                                    Center(
+                                      child: Icon(
+                                        Icons.add,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .error,
+                                        size: 22,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
           ),
         );
       },
@@ -13424,13 +13778,11 @@ class _CropEditorState extends State<CropEditor> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
                 child: Text(
-                  autoFound
-                      ? (conf < 0.55
-                            ? '⚠️ التحديد التلقائي مش واثق منه - راجع الأركان واسحبها.'
-                            : (widget.inline
-                                  ? 'اسحب الدواير على الأركان، أو اسحب من جوه الإطار علشان تحرّكه كله.'
-                                  : 'اسحب الدواير على أركان الباتش. المعاينة تحت بتتحدّث لايف.'))
-                      : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير على أركانه.',
+                  _tapError.isNotEmpty
+                      ? _tapError
+                      : _tapMode
+                      ? 'اضغط على زوايا الباتش بأي ترتيب. ${_tapPoints.length} من 4. بإصبعين تقدر تكبّر وتحرك الصورة.'
+                      : 'اكتمل التحديد 4 من 4. اسحب الدواير للتظبيط، أو اختار تحديد جديد.',
                   style: const TextStyle(fontSize: 12.5),
                 ),
               ),
@@ -13458,7 +13810,7 @@ class _CropEditorState extends State<CropEditor> {
                 Expanded(
                   flex: 3,
                   child: Container(
-                    color: Colors.black12,
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
                     width: double.infinity,
                     child: Stack(
                       children: [
@@ -13544,16 +13896,26 @@ class _CropEditorState extends State<CropEditor> {
                           label: const Text('ضم باتش من صورة تانية'),
                         ),
                         OutlinedButton.icon(
-                          onPressed: _hist.isEmpty ? null : _undo,
+                          onPressed: _tapPoints.isNotEmpty
+                              ? () => setState(() {
+                                  _tapMode = true;
+                                  _tapPoints.removeLast();
+                                  _tapError = '';
+                                  _cropTransform.value = Matrix4.identity();
+                                })
+                              : (_tapMode || _hist.isEmpty ? null : _undo),
                           icon: const Icon(Icons.undo),
-                          label: const Text('تراجع'),
+                          label: Text(
+                            _tapPoints.isNotEmpty ? 'تراجع عن نقطة' : 'تراجع',
+                          ),
                         ),
                         OutlinedButton(
-                          onPressed: () {
-                            _snap();
-                            _init(false);
-                          },
-                          child: const Text('تلقائي'),
+                          onPressed: _restartTap,
+                          child: const Text('تحديد جديد'),
+                        ),
+                        OutlinedButton(
+                          onPressed: _fullTap,
+                          child: const Text('الصورة كلها'),
                         ),
                       ],
                     ),
@@ -13567,11 +13929,13 @@ class _CropEditorState extends State<CropEditor> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: FilledButton(
-                            onPressed: () => widget.onDone(
-                              CropResult(_sortQuads(qs), [
-                                for (final p in merged) baseName(p),
-                              ]),
-                            ),
+                            onPressed: _tapMode || err.isNotEmpty
+                                ? null
+                                : () => widget.onDone(
+                                    CropResult(_sortQuads(qs), [
+                                      for (final p in merged) baseName(p),
+                                    ], turns: _pendingTurns),
+                                  ),
                             child: const Text('تطبيق على الـ PDF'),
                           ),
                         ),
@@ -13585,16 +13949,58 @@ class _CropEditorState extends State<CropEditor> {
   }
 }
 
+class _TapPointsPainter extends CustomPainter {
+  final List<Offset> points;
+  final TextStyle labelStyle;
+  final ColorScheme colors;
+  _TapPointsPainter(this.points, this.labelStyle, this.colors);
+  @override
+  void paint(Canvas c, Size size) {
+    for (var i = 0; i < points.length; i++) {
+      final p = points[i];
+      c.drawCircle(p, 15, Paint()..color = colors.primary);
+      c.drawCircle(
+        p,
+        15,
+        Paint()
+          ..color = colors.onPrimary
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+      final t = TextPainter(
+        text: TextSpan(text: '${i + 1}', style: labelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      t.paint(c, p - Offset(t.width / 2, t.height / 2));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TapPointsPainter old) => true;
+}
+
 class _CropPainter extends CustomPainter {
   final List<List<Offset>> quads; // لكل باتش: tl, tr, bl, br
   final int sel;
-  _CropPainter(this.quads, this.sel);
+  final bool hideSelected;
+  final List<int>? labels;
+  final TextStyle labelStyle;
+  final ColorScheme colors;
+  _CropPainter(
+    this.quads,
+    this.sel, {
+    this.hideSelected = false,
+    this.labels,
+    required this.colors,
+    required this.labelStyle,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     for (var b = 0; b < quads.length; b++) {
+      if (hideSelected && b == sel) continue;
       final p = quads[b];
-      final col = b == sel ? const Color(0xFF00AAFF) : const Color(0xFFFF9800);
+      final col = b == sel ? colors.primary : colors.secondary;
       final path = Path()
         ..moveTo(p[0].dx, p[0].dy)
         ..lineTo(p[1].dx, p[1].dy)
@@ -13610,16 +14016,21 @@ class _CropPainter extends CustomPainter {
           ..strokeWidth = b == sel ? 2.5 : 1.8,
       );
       for (final o in p) {
-        canvas.drawCircle(o, 14, Paint()..color = col.withOpacity(0.33));
+        canvas.drawCircle(o, 14, Paint()..color = colors.primary);
         canvas.drawCircle(
           o,
           14,
           Paint()
-            ..color = Colors.white
+            ..color = colors.onPrimary
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2.5,
         );
-        canvas.drawCircle(o, 3, Paint()..color = col);
+        final i = p.indexOf(o), n = (labels ?? const [1, 2, 4, 3])[i];
+        final text = TextPainter(
+          text: TextSpan(text: '$n', style: labelStyle),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        text.paint(canvas, o - Offset(text.width / 2, text.height / 2));
       }
       if (quads.length > 1) {
         final c = Offset(
@@ -14015,6 +14426,74 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  Future<void> _restoreSavedManual() async {
+    if (_manualBusy) return;
+    final p = item.path, pages = recoverableManualPages(p);
+    if (pages.isEmpty) return;
+    final source = sourceIdentity(p), modified = File(p).statSync().modified;
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('استرجاع السكنر المحفوظ'),
+        content: SizedBox(
+          width: 340,
+          height: 420,
+          child: Column(
+            children: [
+              const Text(
+                'دي النتيجة المحفوظة، مش سكنر جديد. راجعها قبل استخدامها لنفس الباتش.',
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: PageView.builder(
+                  itemCount: pages.length,
+                  itemBuilder: (c, i) => Column(
+                    children: [
+                      Text('صورة ${i + 1} من ${pages.length}'),
+                      Expanded(
+                        child: InteractiveViewer(
+                          maxScale: 6,
+                          child: Image.file(
+                            File(pages[i]),
+                            fit: BoxFit.contain,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('استخدام النتيجة المحفوظة'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true || !mounted) return;
+    if (sourceIdentity(p) != source ||
+        File(p).statSync().modified != modified ||
+        !restoreSavedManualSelection(p)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('الصورة أو النتيجة اتغيّرت. راجع الاختيار من جديد.'),
+        ),
+      );
+      return;
+    }
+    changed = true;
+    await _loadCropView(p);
+    if (mounted) setState(() => rev++);
+  }
+
   void cropBatch() {
     if (_manualBusy) return;
     final me = item;
@@ -14109,13 +14588,24 @@ class _ReviewPageState extends State<ReviewPage> {
     try {
       final source = sourceIdentity(p);
       final modified = File(p).statSync().modified.microsecondsSinceEpoch;
-      created = await scanReceiptAsync(p, manual: r.quads, userRequested: true);
+      created = await scanReceiptAsync(
+        p,
+        manual: r.quads,
+        userRequested: true,
+        turns: r.turns,
+      );
       if (!mounted ||
           sourceIdentity(p) != source ||
           File(p).statSync().modified.microsecondsSinceEpoch != modified) {
         throw StateError('الصورة اتغيّرت أو المراجعة اتقفلت قبل الحفظ.');
       }
-      if (!saveCrop(p, r.quads, pages: created, mergeNames: r.merged)) {
+      if (!saveCrop(
+        p,
+        r.quads,
+        pages: created,
+        mergeNames: r.merged,
+        turns: r.turns,
+      )) {
         throw StateError('تعذّر حفظ نتيجة السكنر. الاختيار السابق لسه محفوظ.');
       }
       saved = true;
@@ -14317,22 +14807,7 @@ class _ReviewPageState extends State<ReviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    final current = Theme.of(context);
-    final dark = current.brightness == Brightness.dark;
-    final colors = ColorScheme.fromSeed(
-      seedColor: const Color(0xFFDFBA61),
-      brightness: current.brightness,
-    );
-    return Theme(
-      data: current.copyWith(
-        colorScheme: colors,
-        scaffoldBackgroundColor: dark ? const Color(0xFF0C121B) : null,
-        appBarTheme: current.appBarTheme.copyWith(
-          backgroundColor: dark ? const Color(0xFF0C121B) : null,
-        ),
-      ),
-      child: Builder(builder: _buildReview),
-    );
+    return _buildReview(context);
   }
 
   Widget _buildReview(BuildContext context) {
@@ -14340,7 +14815,7 @@ class _ReviewPageState extends State<ReviewPage> {
     final it = item;
     final image = Container(
       key: const ValueKey('pos2-review-image'),
-      color: Colors.black12,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: ValueListenableBuilder<bool>(
         valueListenable: _zoomed,
         builder: (c, z, _) => PageView.builder(
@@ -14407,6 +14882,15 @@ class _ReviewPageState extends State<ReviewPage> {
                 ),
               ),
             ),
+          if (choiceNote != null &&
+              recoverableManualPages(it.path).isNotEmpty) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _manualBusy ? null : _restoreSavedManual,
+              icon: const Icon(Icons.restore),
+              label: const Text('استرجاع السكنر المحفوظ'),
+            ),
+          ],
           if (_manualBusy) ...[
             const SizedBox(height: 8),
             const LinearProgressIndicator(),
