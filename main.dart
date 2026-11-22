@@ -127,9 +127,9 @@ void _dbg(String m) {
 }
 
 // ملف التقفيل اللي التطبيق نفسه بيطلّعه (الاسكندريه 5.11.pdf) بس، مش أي اسم بيبدأ بـ "الاسكندريه"
-bool _isAppReportName(String n) =>
-    RegExp(r'^الاسكندريه\s*(\d{1,2}[.\-_]\d{1,2}|اليوم)(\s*\(\d+\))?\.pdf$')
-        .hasMatch(_normAr(n));
+bool _isAppReportName(String n) => RegExp(
+  r'^الاسكندريه\s*(\d{1,2}[.\-_]\d{1,2}|اليوم)(?:_v[1-9]\d*|\s*\(\d+\))?\.pdf$',
+).hasMatch(_normAr(n));
 
 // ───────── عناصر واجهة مدمجة (علشان الشاشة ما تبقاش زحمة) ─────────
 Widget _mini(
@@ -2358,6 +2358,7 @@ Future<void> wipeEverything(BuildContext context) async {
   }
   wipeTree(rawImagesDir);
   wipeTree('$baseDir/.scans');
+  wipeTree('$baseDir/.manual_scans');
   wipeTree(tmpDir);
   wipeTree(mTmpDir);
   wipeTree(defaultMDest);
@@ -5720,9 +5721,27 @@ String sourceIdentity(String path) {
   }
 }
 
+dynamic _cropValueForPath(String path, Map<String, dynamic> store) {
+  final bound = store['path:$path'];
+  if (bound != null) return bound;
+  final named = store[baseName(path)];
+  if (named != null &&
+      (named is! Map || named['path'] == null || named['path'] == path))
+    return named;
+  final shared = store['image:${sourceIdentity(path)}'];
+  // Identical photos that both still exist are separate review choices.
+  // A content-key fallback is for a renamed source, not another live copy.
+  if (shared is Map &&
+      shared['path'] is String &&
+      shared['path'] != path &&
+      File(shared['path'] as String).existsSync())
+    return null;
+  return shared;
+}
+
 Map? cropRecord(String path) {
   final store = _loadCrops(), id = sourceIdentity(path);
-  final v = store['image:$id'] ?? store[baseName(path)];
+  final v = _cropValueForPath(path, store);
   if (v is Map &&
       v['source'] == id &&
       v['v'] == kCropVersion &&
@@ -5756,28 +5775,209 @@ List<List<double>>? _readCropQuads(dynamic v) {
 
 List<List<double>>? cropOf(String path) =>
     _readCropQuads(cropRecord(path)?['quads']);
-void saveCrop(String path, List<List<double>>? qs, {bool original = false}) {
+bool saveCrop(
+  String path,
+  List<List<double>>? qs, {
+  bool original = false,
+  List<String>? pages,
+  List<String>? mergeNames,
+}) {
   try {
     final m = _loadCrops();
     if (qs == null && !original) {
       m.remove(baseName(path));
       m.remove('image:${sourceIdentity(path)}');
+      m.remove('path:$path');
     } else {
-      if (qs != null && _readCropQuads(qs) == null) return;
+      if (qs != null && _readCropQuads(qs) == null) return false;
+      final outputs = <Map<String, dynamic>>[];
+      if (pages != null) {
+        if (qs == null || pages.length != qs.length) return false;
+        for (final p in pages) {
+          if (!_savedScanFile(p)) return false;
+          outputs.add({
+            'path': p,
+            'identity': sourceIdentity(p),
+            'modified': File(p).statSync().modified.microsecondsSinceEpoch,
+          });
+        }
+      }
       m[baseName(path)] = {
         'v': kCropVersion,
         'source': sourceIdentity(path),
         'modified': File(path).statSync().modified.microsecondsSinceEpoch,
         'mode': original ? 'original' : 'manual',
+        'path': path,
+        if (mergeNames != null) 'merges': List<String>.from(mergeNames),
         'quads': qs,
+        if (pages != null) 'pages': outputs,
       };
       m['image:${sourceIdentity(path)}'] = m[baseName(path)];
+      m['path:$path'] = m[baseName(path)];
     }
     final f = File('$cropStorePath.tmp')..createSync(recursive: true);
-    f.writeAsStringSync(jsonEncode(m));
+    f.writeAsStringSync(jsonEncode(m), flush: true);
     f.renameSync(cropStorePath);
     cropRev.value++;
-  } catch (_) {}
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// A selected image is read-only. Only the review's explicit manual-save action
+// may create scan pixels. Missing manual results are never silently rebuilt.
+class PdfImageSelection {
+  final List<String> pages;
+  final bool manual;
+  final String? issue;
+  const PdfImageSelection(this.pages, {this.manual = false, this.issue});
+  bool get needsChoice => issue != null;
+}
+
+bool _savedScanFile(String p) {
+  RandomAccessFile? file;
+  try {
+    if (p.split(Platform.pathSeparator).contains('..')) return false;
+    if (!p.startsWith('$baseDir/.manual_scans/') &&
+        !p.startsWith('$baseDir/.scans/'))
+      return false;
+    if (FileSystemEntity.typeSync(p, followLinks: false) !=
+        FileSystemEntityType.file)
+      return false;
+    file = File(p).openSync();
+    final length = file.lengthSync();
+    if (length < 4) return false;
+    final header = file.readSync(math.min(length, 65536));
+    file.setPositionSync(length - 2);
+    final end = file.readSync(2);
+    return end.length == 2 &&
+        end[0] == 255 &&
+        end[1] == 217 &&
+        _jpegSize(header) != null;
+  } catch (_) {
+    return false;
+  } finally {
+    try {
+      file?.closeSync();
+    } catch (_) {}
+  }
+}
+
+void _rememberCropSourceAlias(
+  String path,
+  Map raw,
+  Map<String, dynamic> store,
+) {
+  if (store['path:$path'] is Map &&
+      (store['path:$path'] as Map)['source'] == raw['source'])
+    return;
+  try {
+    final value = Map<String, dynamic>.from(raw)..['path'] = path;
+    store['path:$path'] = value;
+    store['image:${raw['source']}'] = value;
+    store[baseName(path)] = value;
+    final f = File('$cropStorePath.tmp')..createSync(recursive: true);
+    f.writeAsStringSync(jsonEncode(store), flush: true);
+    f.renameSync(cropStorePath);
+  } catch (_) {
+    // Reading a valid saved image remains possible if alias bookkeeping fails.
+  }
+}
+
+PdfImageSelection pdfImageSelection(
+  String path, {
+  Map<String, dynamic>? store,
+}) {
+  try {
+    if (!File(path).existsSync()) {
+      return const PdfImageSelection(
+        [],
+        issue: 'الصورة المستلمة مش موجودة. رجّعها قبل تجهيز الـ PDF.',
+      );
+    }
+    final m = store ?? _loadCrops(), id = sourceIdentity(path);
+    final raw = _cropValueForPath(path, m);
+    if (raw == null) return PdfImageSelection([path]);
+    final manual =
+        raw is List ||
+        (raw is Map && (raw['mode'] == 'manual' || raw['quads'] != null));
+    if (!manual) return PdfImageSelection([path]);
+    if (raw is! Map ||
+        raw['source'] != id ||
+        raw['v'] != kCropVersion ||
+        raw['modified'] !=
+            File(path).statSync().modified.microsecondsSinceEpoch) {
+      return const PdfImageSelection(
+        [],
+        manual: true,
+        issue: 'اختيار سكنر يدوي قديم أو الصورة اتغيّرت. اختار الأصل أو اعمل سكنر يدوي من جديد.',
+      );
+    }
+    final qs = _readCropQuads(raw['quads']);
+    if (qs == null) {
+      return const PdfImageSelection(
+        [],
+        manual: true,
+        issue: 'حدود السكنر المحفوظة مش صالحة. اختار الأصل أو اعمل سكنر يدوي.',
+      );
+    }
+    _rememberCropSourceAlias(path, raw, m);
+    final stored = raw['pages'];
+    if (stored is List) {
+      final pages = <String>[];
+      for (final v in stored) {
+        if (v is! Map || v['path'] is! String || v['identity'] is! String)
+          break;
+        final p = v['path'] as String;
+        if (!_savedScanFile(p) ||
+            sourceIdentity(p) != v['identity'] ||
+            File(p).statSync().modified.microsecondsSinceEpoch != v['modified'])
+          break;
+        pages.add(p);
+      }
+      if (pages.length == qs.length && pages.length == stored.length) {
+        return PdfImageSelection(pages, manual: true);
+      }
+    } else {
+      // Read an existing legacy MANUAL cache only. Never call its generator.
+      final st = File(path).statSync();
+      final safe = baseName(path).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+      final tag =
+          'm9_${qs.expand((q) => q).map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
+      final base =
+          '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+      final pages = [for (var i = 0; i < qs.length; i++) '${base}_$i.jpg'];
+      if (pages.every(_savedScanFile))
+        return PdfImageSelection(pages, manual: true);
+    }
+    return const PdfImageSelection(
+      [],
+      manual: true,
+      issue: 'نتيجة السكنر اليدوي المحفوظة مفقودة أو اتغيّرت. اختار الأصل أو أعد السكنر بالزر.',
+    );
+  } catch (_) {
+    return const PdfImageSelection(
+      [],
+      issue: 'تعذّر قراءة اختيار الصورة. راجعه قبل تجهيز الـ PDF.',
+    );
+  }
+}
+
+List<ReceiptItem> pendingPdfImageChoices(Iterable<ReceiptItem> items) {
+  final store = _loadCrops();
+  return [
+    for (final r in items)
+      if (pdfImageSelection(r.path, store: store).needsChoice) r,
+  ];
+}
+
+List<String> selectedPdfPages(String path) {
+  final selected = pdfImageSelection(path);
+  if (selected.needsChoice) {
+    throw StateError('${baseName(path)}: ${selected.issue}');
+  }
+  return selected.pages;
 }
 
 // بيتغير لما قص يدوي يتحفظ علشان الصور المصغرة تتحدّث
@@ -5839,9 +6039,8 @@ class _ReceiptThumbState extends State<_ReceiptThumb> {
       final f = File(p);
       if (!f.existsSync()) return;
       final st = f.statSync();
-      final mq = cropOf(p);
       final key =
-          '$p|${st.size}|${st.modified.millisecondsSinceEpoch}|${mq == null ? 'a' : jsonEncode(mq)}';
+          '$p|${st.size}|${st.modified.millisecondsSinceEpoch}|${cropRev.value}|${jsonEncode(cropRecord(p))}';
       res = _thumbMemo[key];
       if (res != null && !File(res).existsSync()) res = null;
       if (res == null) {
@@ -5851,9 +6050,8 @@ class _ReceiptThumbState extends State<_ReceiptThumb> {
         try {
           await prev;
           if (!mounted || gen != _gen) return;
-          var l = <String>[];
-          if (mq != null) l = await scanReceiptAsync(p, manual: mq);
-          if (l.isEmpty) l = await scanReceiptAsync(p);
+          final selected = pdfImageSelection(p);
+          final l = selected.needsChoice ? <String>[] : selected.pages;
           if (l.isNotEmpty) {
             res = l.first;
             _thumbMemo[key] = res;
@@ -5894,19 +6092,43 @@ class _ReceiptThumbState extends State<_ReceiptThumb> {
 final String mergeStorePath = '$baseDir/.app_merge.json';
 
 Map<String, dynamic> _loadMerges() {
+  var result = <String, dynamic>{};
   try {
-    return Map<String, dynamic>.from(
+    result = Map<String, dynamic>.from(
       jsonDecode(File(mergeStorePath).readAsStringSync()) as Map,
     );
-  } catch (_) {
-    return <String, dynamic>{};
+  } catch (_) {}
+  for (final raw in _loadCrops().values) {
+    if (raw is! Map || raw['path'] is! String || raw['merges'] is! List)
+      continue;
+    final path = raw['path'] as String;
+    final name = baseName(path);
+    if (!File(path).existsSync() ||
+        raw['source'] != sourceIdentity(path) ||
+        raw['v'] != kCropVersion ||
+        raw['modified'] !=
+            File(path).statSync().modified.microsecondsSinceEpoch) {
+      result.remove(name);
+    } else if ((raw['merges'] as List).isEmpty) {
+      result.remove(name);
+    } else {
+      result[name] = List.from(raw['merges']);
+    }
   }
+  return result;
 }
 
 List<String> mergeOf(String path) {
+  final m = _loadCrops();
+  final raw = _cropValueForPath(path, m);
+  if (raw is Map && raw['merges'] is List) {
+    final valid = cropRecord(path);
+    return valid == null
+        ? <String>[]
+        : [for (final n in raw['merges']) n.toString()];
+  }
   final v = _loadMerges()[baseName(path)];
-  if (v is List) return [for (final e in v) e.toString()];
-  return <String>[];
+  return v is List ? [for (final e in v) e.toString()] : <String>[];
 }
 
 // لو الصورة دي مضمومة لصورة تانية: بيرجّع اسم المضيفة
@@ -6067,38 +6289,40 @@ Future<List<Uint8List>> warpPreviewAsync(String path, List<List<double>> qs) =>
 final Map<String, double> autoConf =
     <String, double>{}; // ثقة القص التلقائي لكل صورة (0..1)
 
+int _manualScanSerial = 0;
 Future<List<String>> scanReceiptAsync(
   String src, {
   List<List<double>>? manual,
+  bool userRequested = false,
 }) async {
-  try {
-    if (fullOriginalOf(src) || cropNeedsReview(src)) {
-      autoConf[src] = 0;
-      return [src];
-    }
-    final st = File(src).statSync();
-    Directory('$baseDir/.scans').createSync(recursive: true);
-    final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final tag = manual == null
-        ? 'v9'
-        : 'm9_${manual.expand((q) => q).map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
-    final base =
-        '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
-    if (manual != null)
-      return await Isolate.run(() => _scanManual(src, base, manual));
-    final res = await Isolate.run(() => _scanToPages(src, base));
-    try {
-      final cf = File('${base}_conf');
-      if (cf.existsSync()) {
-        autoConf[src] = double.tryParse(cf.readAsStringSync()) ?? 1.0;
-      } else if (res.isEmpty) {
-        autoConf[src] = 0.0;
-      }
-    } catch (_) {}
-    return res;
-  } catch (_) {
-    return <String>[];
+  if (!userRequested) {
+    final selected = pdfImageSelection(src);
+    return selected.needsChoice ? <String>[] : selected.pages;
   }
+  if (manual == null || _readCropQuads(manual) == null) {
+    throw ArgumentError('السكنر اليدوي محتاج حدود صالحة يختارها المستخدم.');
+  }
+  final before = sourceIdentity(src);
+  final modified = File(src).statSync().modified.microsecondsSinceEpoch;
+  Directory('$baseDir/.manual_scans').createSync(recursive: true);
+  final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+  final base =
+      '$baseDir/.manual_scans/m10_${DateTime.now().microsecondsSinceEpoch}_${++_manualScanSerial}_$safe';
+  final pages = await Isolate.run(() => _scanManual(src, base, manual));
+  if (pages.length != manual.length ||
+      !pages.every(_savedScanFile) ||
+      sourceIdentity(src) != before ||
+      File(src).statSync().modified.microsecondsSinceEpoch != modified) {
+    for (final p in pages) {
+      try {
+        File(p).deleteSync();
+      } catch (_) {}
+    }
+    throw StateError(
+      'السكنر اليدوي ما اكتملش أو الصورة اتغيّرت. الاختيار السابق لسه محفوظ.',
+    );
+  }
+  return pages;
 }
 
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
@@ -6956,61 +7180,344 @@ Map<String, dynamic> _pdfRecords() {
   }
 }
 
-List<ReceiptItem> mergeReviewedReceipts(List<ReceiptItem> fresh,List<ReceiptItem> previous) {
-  final result=List<ReceiptItem>.from(fresh);
-  for(final old in previous) {
-    if(!File(old.path).existsSync())continue;
-    if(result.any((x)=>(old.key.isNotEmpty && x.key==old.key) || sourceIdentity(x.path)==sourceIdentity(old.path)))continue;
+List<ReceiptItem> mergeReviewedReceipts(
+  List<ReceiptItem> fresh,
+  List<ReceiptItem> previous,
+) {
+  final result = List<ReceiptItem>.from(fresh);
+  for (final old in previous) {
+    if (!File(old.path).existsSync()) continue;
+    if (result.any(
+      (x) =>
+          (old.key.isNotEmpty && x.key == old.key) ||
+          sourceIdentity(x.path) == sourceIdentity(old.path),
+    ))
+      continue;
     result.add(old);
   }
   return result;
 }
 
 String pdfInputSignature(List<ReceiptItem> items) {
+  for (final r in items) {
+    pdfImageSelection(r.path);
+  }
   final rows = [
     for (final r in items)
       jsonEncode({
         'image': sourceIdentity(r.path),
+        'imageModified': File(r.path)
+            .statSync()
+            .modified
+            .microsecondsSinceEpoch,
         'amount': r.amount,
         'machine': r.tid,
         'date': r.date,
         'crop': cropRecord(r.path),
+        'selected': [
+          for (final p in pdfImageSelection(r.path).pages)
+            [p, sourceIdentity(p)],
+        ],
+        'choiceRequired': pdfImageSelection(r.path).needsChoice,
         'legacy': cropNeedsReview(r.path),
         'merge': mergeOf(r.path),
       }),
   ]..sort();
-  return jsonEncode({'algorithm': kCropVersion, 'rows': rows});
+  return jsonEncode({
+    'algorithm': kCropVersion,
+    'imagePolicy': 'manual-only-v1',
+    'rows': rows,
+  });
 }
 
 String? reusablePdf(String logical, String input) {
   final record = _pdfRecords()[logical];
   if (record is Map &&
       record['input'] == input &&
-      record['path'] is String &&
-      File(record['path']).existsSync())
+      record['path'] == logical &&
+      record['policy'] == 'manual-only-v1' &&
+      File(logical).existsSync() &&
+      record['outputIdentity'] == sourceIdentity(logical) &&
+      record['outputModified'] ==
+          File(logical).statSync().modified.microsecondsSinceEpoch)
     return record['path'];
   return null;
 }
 
-String unusedPdfPath(String logical) {
-  if (!File(logical).existsSync()) return logical;
-  final stem = logical.toLowerCase().endsWith('.pdf')
-      ? logical.substring(0, logical.length - 4)
-      : logical;
-  var n = 2;
-  while (File('${stem}_v$n.pdf').existsSync()) {
-    n++;
+bool recordPdf(String logical, String input, String selected) {
+  try {
+    final records = _pdfRecords();
+    records[logical] = {
+      'input': input,
+      'path': selected,
+      'policy': 'manual-only-v1',
+      'outputIdentity': sourceIdentity(selected),
+      'outputModified': File(selected)
+          .statSync()
+          .modified
+          .microsecondsSinceEpoch,
+    };
+    final f = File('$baseDir/.pdf_outputs.json.tmp')
+      ..createSync(recursive: true);
+    f.writeAsStringSync(jsonEncode(records), flush: true);
+    f.renameSync('$baseDir/.pdf_outputs.json');
+    return true;
+  } catch (_) {
+    return false;
   }
-  return '${stem}_v$n.pdf';
 }
 
-void recordPdf(String logical, String input, String selected) {
-  final records = _pdfRecords();
-  records[logical] = {'input': input, 'path': selected};
-  final f = File('$baseDir/.pdf_outputs.json.tmp')..createSync(recursive: true);
-  f.writeAsStringSync(jsonEncode(records));
-  f.renameSync('$baseDir/.pdf_outputs.json');
+final Map<String, Future<void>> _pdfWriteLocks = {};
+final Map<String, List<String>> pdfCleanupWarnings = {};
+Future<T> _withPdfWriteLock<T>(String logical, Future<T> Function() run) async {
+  final previous = _pdfWriteLocks[logical] ?? Future<void>.value();
+  final done = Completer<void>();
+  _pdfWriteLocks[logical] = done.future;
+  try {
+    await previous;
+    return await run();
+  } finally {
+    done.complete();
+    if (identical(_pdfWriteLocks[logical], done.future))
+      _pdfWriteLocks.remove(logical);
+  }
 }
+
+void cleanupOldReportVersions(String logical) {
+  final failures = <String>[];
+  final name = baseName(logical);
+  if (!File(logical).existsSync() || !_hasPdfHeader(File(logical))) return;
+  if (_isAppReportName(name) &&
+      !RegExp(r'_v\d+\.pdf$', caseSensitive: false).hasMatch(name)) {
+    final stem = name.substring(0, name.length - 4);
+    final family = RegExp(
+      '^${RegExp.escape(stem)}_v[1-9][0-9]*\\.pdf\$',
+      caseSensitive: false,
+    );
+    try {
+      for (final f in File(
+        logical,
+      ).parent.listSync(followLinks: false).whereType<File>()) {
+        if (!family.hasMatch(baseName(f.path))) continue;
+        try {
+          f.deleteSync();
+        } catch (_) {
+          failures.add(baseName(f.path));
+        }
+      }
+    } catch (_) {
+      failures.add('تعذّر فحص النسخ القديمة');
+    }
+  }
+  pdfCleanupWarnings[logical] = failures;
+}
+
+String commitReceiptPdfBytes(
+  String logical,
+  Uint8List bytes,
+  String input, {
+  bool Function()? stillCurrent,
+}) {
+  if (bytes.length < 12 ||
+      ascii.decode(bytes.sublist(0, 5), allowInvalid: true) != '%PDF-' ||
+      !ascii
+          .decode(
+            bytes.sublist(math.max(0, bytes.length - 40)),
+            allowInvalid: true,
+          )
+          .contains('%%EOF')) {
+    throw StateError('ملف PDF الجديد غير مكتمل. آخر ملف ناجح ما اتغيّرش.');
+  }
+  final output = File(logical);
+  output.parent.createSync(recursive: true);
+  final tag = '${DateTime.now().microsecondsSinceEpoch}_${++_manualScanSerial}';
+  final temp = File('${output.parent.path}/.${baseName(logical)}.part.$tag');
+  final backup = File(
+    '${output.parent.path}/.${baseName(logical)}.previous.$tag',
+  );
+  var replaced = false, success = false;
+  try {
+    temp.writeAsBytesSync(bytes, flush: true);
+    if (output.existsSync()) output.copySync(backup.path);
+    if (stillCurrent != null && !stillCurrent()) {
+      throw StateError(
+        'اختيارات المراجعة اتغيّرت أثناء تجهيز الـ PDF. أعد التجهيز؛ آخر ملف ناجح محفوظ.',
+      );
+    }
+    temp.renameSync(logical);
+    replaced = true;
+    if (!recordPdf(logical, input, logical)) {
+      throw FileSystemException('تعذّر حفظ سجل نتيجة الـ PDF', logical);
+    }
+    success = true;
+  } catch (e) {
+    if (backup.existsSync()) {
+      try {
+        backup.copySync(logical);
+      } catch (_) {
+        throw FileSystemException(
+          'تعذّر الاستبدال. آخر نسخة ناجحة محفوظة هنا',
+          backup.path,
+        );
+      }
+    } else if (replaced) {
+      try {
+        output.deleteSync();
+      } catch (_) {}
+    }
+    rethrow;
+  } finally {
+    try {
+      if (temp.existsSync()) temp.deleteSync();
+    } catch (_) {}
+    if (success || !replaced) {
+      try {
+        if (backup.existsSync()) backup.deleteSync();
+      } catch (_) {}
+    }
+  }
+  cleanupOldReportVersions(logical);
+  return logical;
+}
+
+Future<String?> buildReceiptPdf(
+  List<ReceiptItem> items,
+  File out, {
+  void Function(int)? onProgress,
+}) => _withPdfWriteLock(out.path, () async {
+  var pageNo = 0;
+  final logical = out.path, input = pdfInputSignature(items);
+  for (final r in items) {
+    selectedPdfPages(r.path);
+  }
+  final reused = reusablePdf(logical, input);
+  if (reused != null) {
+    cleanupOldReportVersions(logical);
+    return reused;
+  }
+  final pdf = pw.Document();
+  var pages = 0;
+  // الصور المضمومة: الصورة المضيفة بتاخدها جنبها في نفس الصفحة، والمضمومة مبتطلعش صفحة لوحدها
+  final mergeMap = {for (final r in items) baseName(r.path): mergeOf(r.path)};
+  final byBase = <String, ReceiptItem>{
+    for (final x in items) baseName(x.path): x,
+  };
+  final mergedOf = <String, List<ReceiptItem>>{};
+  final hidden = <String>{};
+  for (final r in items) {
+    final names = mergeMap[baseName(r.path)];
+    if (names == null) continue;
+    for (final nm in names) {
+      final m = byBase[nm.toString()];
+      if (m == null || identical(m, r)) continue;
+      (mergedOf[baseName(r.path)] ??= <ReceiptItem>[]).add(m);
+      hidden.add(nm.toString());
+    }
+  }
+  hidden.removeAll(mergedOf.keys); // مضيف مبيتخبّاش (يمنع الدوران)
+  Future<List<String>> pagesOf(String path) async => selectedPdfPages(path);
+
+  for (final r in items) {
+    pageNo++;
+    onProgress?.call(pageNo);
+    if (hidden.contains(baseName(r.path))) continue;
+    if (!File(r.path).existsSync()) continue;
+    var srcs = selectedPdfPages(r.path);
+    for (final mi in mergedOf[baseName(r.path)] ?? const <ReceiptItem>[]) {
+      if (File(mi.path).existsSync())
+        srcs = [...srcs, ...await pagesOf(mi.path)];
+    }
+    // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
+    if (srcs.length > 1) {
+      try {
+        final ims = <pw.MemoryImage>[];
+        final dims = <List<int>>[];
+        for (final p in srcs) {
+          final b = File(p).readAsBytesSync();
+          final d = _jpegSize(b);
+          if (d == null) throw Exception('not jpeg');
+          ims.add(pw.MemoryImage(b));
+          dims.add(d);
+        }
+        const mg = 6.0, gap = 8.0;
+        final n = ims.length;
+        final pageW = 420.0 + 140.0 * (n - 1);
+        final contentW = pageW - 2 * mg - gap * (n - 1);
+        final sumW = dims.fold<int>(0, (a, d) => a + d[0]);
+        final k = contentW / sumW;
+        final maxH = dims.map((d) => d[1] * k).reduce((a, b) => a > b ? a : b);
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat(pageW, maxH + 2 * mg),
+            margin: const pw.EdgeInsets.all(mg),
+            build: (pw.Context ctx) => pw.Directionality(
+              textDirection: pw.TextDirection.ltr,
+              child: pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < n; i++) ...[
+                    if (i > 0) pw.SizedBox(width: gap),
+                    pw.SizedBox(
+                      width: dims[i][0] * k,
+                      height: dims[i][1] * k,
+                      child: pw.Image(ims[i], fit: pw.BoxFit.fill),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+        pages++;
+        continue;
+      } catch (_) {
+        // لو فشل التركيب نرجع للطريقة القديمة: صفحة لكل باتش
+      }
+    }
+    for (final p in srcs) {
+      try {
+        final bytes = File(p).readAsBytesSync();
+        final imgWidget = pw.MemoryImage(bytes);
+        final sz = kFitPageToReceipt ? _jpegSize(bytes) : null;
+        if (sz != null) {
+          // صفحة بنسبة الباتش نفسه: العرض ثابت والارتفاع على قد الصورة
+          const pageW = 420.0, mg = 6.0;
+          final pageH = (pageW - 2 * mg) * sz[1] / sz[0] + 2 * mg;
+          pdf.addPage(
+            pw.Page(
+              pageFormat: PdfPageFormat(pageW, pageH),
+              margin: const pw.EdgeInsets.all(mg),
+              build: (pw.Context ctx) =>
+                  pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+            ),
+          );
+        } else {
+          pdf.addPage(
+            pw.Page(
+              pageFormat: PdfPageFormat.a4,
+              margin: const pw.EdgeInsets.all(20),
+              build: (pw.Context ctx) =>
+                  pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+            ),
+          );
+        }
+        pages++;
+      } catch (e) {
+        throw StateError(
+          'تعذّر إضافة صورة إلى الـ PDF: ${baseName(p)}. آخر نتيجة ناجحة محفوظة.',
+        );
+      }
+    }
+  }
+  if (pages == 0) return null;
+  final bytes = await pdf.save();
+  return commitReceiptPdfBytes(
+    logical,
+    bytes,
+    input,
+    stillCurrent: () => pdfInputSignature(items) == input,
+  );
+});
 
 // ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
 final String fixPath = '$baseDir/.app_fix.json';
@@ -9099,6 +9606,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // أحدث ملف إخراج (إكسيل/PDF): من آخر معالجة، أو آخر ملف "الاسكندريه ..." في فولدر الإخراج
   String? latestOutput(String ext) {
     // لسه فيه إيصالات محتاجة مراجعة: ما نعرضش ملف قديم ممكن يكون إجمالياته غلط
+    if (ext == '.pdf' &&
+        pendingPdfImageChoices(processedItems.where((r) => r.counts))
+            .isNotEmpty)
+      return null;
     if (reviewHold &&
         (ext == '.xlsx' ? kHoldExcelUntilReviewed : kHoldPdfUntilReviewed))
       return null;
@@ -9754,156 +10265,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // (باتش غلط / ماكينة أو مبلغ مش متحدد / مكرر مشكوك فيه / تاريخ مختلف...)
     final pendingRv = processedItems.where((e) => e.needsReview).toList();
     final holdXlsx = kHoldExcelUntilReviewed && pendingRv.isNotEmpty;
-    final holdPdf = kHoldPdfUntilReviewed && pendingRv.isNotEmpty;
-    reviewHold = holdXlsx || holdPdf;
-    var pageNo = 0;
-    Future<String?> buildPdf(List<ReceiptItem> items, File out) async {
-      final logical = out.path, input = pdfInputSignature(items);
-      final reused = reusablePdf(logical, input);
-      if (reused != null) return reused;
-      out = File(unusedPdfPath(logical));
-      final pdf = pw.Document();
-      var pages = 0;
-      // الصور المضمومة: الصورة المضيفة بتاخدها جنبها في نفس الصفحة، والمضمومة مبتطلعش صفحة لوحدها
-      final mergeMap = _loadMerges();
-      final byBase = <String, ReceiptItem>{
-        for (final x in items) baseName(x.path): x,
-      };
-      final mergedOf = <String, List<ReceiptItem>>{};
-      final hidden = <String>{};
-      for (final r in items) {
-        final names = mergeMap[baseName(r.path)];
-        if (names is! List) continue;
-        for (final nm in names) {
-          final m = byBase[nm.toString()];
-          if (m == null || identical(m, r)) continue;
-          (mergedOf[baseName(r.path)] ??= <ReceiptItem>[]).add(m);
-          hidden.add(nm.toString());
-        }
-      }
-      hidden.removeAll(mergedOf.keys); // مضيف مبيتخبّاش (يمنع الدوران)
-      Future<List<String>> pagesOf(String path) async {
-        var l = <String>[];
-        try {
-          final mq = cropOf(path);
-          if (mq != null) l = await scanReceiptAsync(path, manual: mq);
-          if (l.isEmpty) l = await scanReceiptAsync(path);
-        } catch (_) {}
-        return l.isEmpty ? <String>[path] : l;
-      }
-
-      for (final r in items) {
-        pageNo++;
-        if (hidden.contains(baseName(r.path))) continue;
-        if (!File(r.path).existsSync()) continue;
-        setState(
-          () => status =
-              'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...',
-        );
-        // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
-        var srcs = <String>[];
-        try {
-          final mq = cropOf(r.path);
-          if (mq != null) srcs = await scanReceiptAsync(r.path, manual: mq);
-          if (srcs.isEmpty) srcs = await scanReceiptAsync(r.path);
-        } catch (_) {}
-        if (srcs.isEmpty) srcs = <String>[r.path];
-        for (final mi in mergedOf[baseName(r.path)] ?? const <ReceiptItem>[]) {
-          if (File(mi.path).existsSync())
-            srcs = [...srcs, ...await pagesOf(mi.path)];
-        }
-        // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
-        if (srcs.length > 1) {
-          try {
-            final ims = <pw.MemoryImage>[];
-            final dims = <List<int>>[];
-            for (final p in srcs) {
-              final b = File(p).readAsBytesSync();
-              final d = _jpegSize(b);
-              if (d == null) throw Exception('not jpeg');
-              ims.add(pw.MemoryImage(b));
-              dims.add(d);
-            }
-            const mg = 6.0, gap = 8.0;
-            final n = ims.length;
-            final pageW = 420.0 + 140.0 * (n - 1);
-            final contentW = pageW - 2 * mg - gap * (n - 1);
-            final sumW = dims.fold<int>(0, (a, d) => a + d[0]);
-            final k = contentW / sumW;
-            final maxH = dims
-                .map((d) => d[1] * k)
-                .reduce((a, b) => a > b ? a : b);
-            pdf.addPage(
-              pw.Page(
-                pageFormat: PdfPageFormat(pageW, maxH + 2 * mg),
-                margin: const pw.EdgeInsets.all(mg),
-                build: (pw.Context ctx) => pw.Directionality(
-                  textDirection: pw.TextDirection.ltr,
-                  child: pw.Row(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                    children: [
-                      for (var i = 0; i < n; i++) ...[
-                        if (i > 0) pw.SizedBox(width: gap),
-                        pw.SizedBox(
-                          width: dims[i][0] * k,
-                          height: dims[i][1] * k,
-                          child: pw.Image(ims[i], fit: pw.BoxFit.fill),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            );
-            pages++;
-            continue;
-          } catch (_) {
-            // لو فشل التركيب نرجع للطريقة القديمة: صفحة لكل باتش
-          }
-        }
-        for (final p in srcs) {
-          try {
-            final bytes = File(p).readAsBytesSync();
-            final imgWidget = pw.MemoryImage(bytes);
-            final sz = kFitPageToReceipt ? _jpegSize(bytes) : null;
-            if (sz != null) {
-              // صفحة بنسبة الباتش نفسه: العرض ثابت والارتفاع على قد الصورة
-              const pageW = 420.0, mg = 6.0;
-              final pageH = (pageW - 2 * mg) * sz[1] / sz[0] + 2 * mg;
-              pdf.addPage(
-                pw.Page(
-                  pageFormat: PdfPageFormat(pageW, pageH),
-                  margin: const pw.EdgeInsets.all(mg),
-                  build: (pw.Context ctx) => pw.Center(
-                    child: pw.Image(imgWidget, fit: pw.BoxFit.contain),
-                  ),
-                ),
-              );
-            } else {
-              pdf.addPage(
-                pw.Page(
-                  pageFormat: PdfPageFormat.a4,
-                  margin: const pw.EdgeInsets.all(20),
-                  build: (pw.Context ctx) => pw.Center(
-                    child: pw.Image(imgWidget, fit: pw.BoxFit.contain),
-                  ),
-                ),
-              );
-            }
-            pages++;
-          } catch (_) {}
-        }
-      }
-      if (pages == 0) return null;
-      final temp = File('${out.path}.tmp');
-      await temp.writeAsBytes(await pdf.save());
-      if (out.existsSync()) {
-        out = File(unusedPdfPath(logical));
-      }
-      await temp.rename(out.path);
-      recordPdf(logical, input, out.path);
-      return out.path;
-    }
+    final imageChoices = pendingPdfImageChoices([
+      ...mainItems,
+      for (final v in otherByDate.values) ...v,
+    ]);
+    final financialPdfHold = kHoldPdfUntilReviewed && pendingRv.isNotEmpty;
+    final holdPdf = financialPdfHold || imageChoices.isNotEmpty;
+    reviewHold = holdXlsx || financialPdfHold;
+    Future<String?> buildPdf(
+      List<ReceiptItem> items,
+      File out,
+    ) => buildReceiptPdf(
+      items,
+      out,
+      onProgress: (n) {
+        if (mounted)
+          setState(
+            () => status =
+                'جاري تجهيز صفحات الـ PDF ($n / ${processedItems.length})...',
+          );
+      },
+    );
 
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
     extraPdfPaths = [];
@@ -9980,7 +10362,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final noAmount = pendingRv
         .where((e) => !e.ignoredDoc && e.amount <= 0)
         .length;
-    final holdLine = (holdXlsx || holdPdf)
+    final holdLine = (holdXlsx || financialPdfHold)
         ? '\n⏸️ لسه ${pendingRv.length} إيصال محتاج مراجعة'
               '${noMachine > 0 ? ' ($noMachine من غير ماكينة محددة)' : ''}'
               '${noAmount > 0 ? ' ($noAmount من غير مبلغ مقروء)' : ''}'
@@ -9991,7 +10373,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       () => status =
           'اكتمل العد: ${_countLine()}\n'
               '$xlsxLine\n'
-              '${holdPdf ? '• ⏸️ الـ PDF لسه ما اتعملش.' : '• ملف PDF جاهز. إعادة الفحص بدون تغيير بتحافظ عليه، وأي نسخة جديدة باسم منفصل.'}$holdLine' +
+              '${imageChoices.isNotEmpty
+                  ? '• ⏸️ الـ PDF مستني اختيار صورة ${imageChoices.length} باتش: الأصل أو سكنر يدوي. آخر ملف ناجح محفوظ ولم يتم تحديثه.'
+                  : holdPdf
+                  ? '• ⏸️ الـ PDF لسه ما اتعملش.'
+                  : '• ملف PDF جاهز بالاسم النهائي، من غير أرقام إصدارات.'}${[pdfOutFile.path, ...extraPdfPaths].any((p) => pdfCleanupWarnings[p]?.isNotEmpty ?? false) ? '\n• بعض النسخ القديمة تعذّر حذفها. اقفلها وأعد الفحص لتنظيفها.' : ''}$holdLine' +
           (extraPdfPaths.isEmpty
               ? ''
               : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
@@ -10546,8 +10932,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await prepareDefaultFiles();
 
     await loadScanCache();
-    final previousReceipts=manualPaths==null?<ReceiptItem>[]:List<ReceiptItem>.from(processedItems);
-    final previousSystems=manualPaths==null?<SysTotal>[]:List<SysTotal>.from(sysReads);
+    final previousReceipts = manualPaths == null
+        ? <ReceiptItem>[]
+        : List<ReceiptItem>.from(processedItems);
+    final previousSystems = manualPaths == null
+        ? <SysTotal>[]
+        : List<SysTotal>.from(sysReads);
     final oldFixes = loadFixes();
     for (final it in processedItems) {
       if (it.how == 'manual' || oldFixes.containsKey(it.key)) saveFix(it);
@@ -11139,10 +11529,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (ig != null) ignoredItems.add(ig);
     }
 
-    final combined=mergeReviewedReceipts(rawReceipts,previousReceipts);
-    rawReceipts..clear()..addAll(combined);
-    for(final old in previousSystems) {
-      if(!sysReads.any((x)=>x.file==old.file))sysReads.add(old);
+    final combined = mergeReviewedReceipts(rawReceipts, previousReceipts);
+    rawReceipts
+      ..clear()
+      ..addAll(combined);
+    for (final old in previousSystems) {
+      if (!sysReads.any((x) => x.file == old.file)) sysReads.add(old);
     }
     await saveScanCache();
     for (final s in sysReads) {
@@ -12655,12 +13047,8 @@ class _CropEditorState extends State<CropEditor> {
   Future<void> _loadMb(String p) async {
     if (mb.containsKey(p)) return;
     try {
-      var l = <String>[];
-      final mq = cropOf(p);
-      if (mq != null) l = await scanReceiptAsync(p, manual: mq);
-      if (l.isEmpty) l = await scanReceiptAsync(p);
-      final bytes = <Uint8List>[for (final f in l) File(f).readAsBytesSync()];
-      mb[p] = bytes.isEmpty ? <Uint8List>[File(p).readAsBytesSync()] : bytes;
+      final l = selectedPdfPages(p);
+      mb[p] = <Uint8List>[for (final f in l) File(f).readAsBytesSync()];
     } catch (_) {
       mb[p] = <Uint8List>[];
     }
@@ -12723,6 +13111,17 @@ class _CropEditorState extends State<CropEditor> {
     setState(() => busy = true);
     await _loadMb(pick.path);
     if (!mounted) return;
+    if (mb[pick.path]?.isEmpty ?? true) {
+      setState(() => busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'راجع صورة الباتش المضموم واختار الأصل أو نتيجة سكنر يدوي محفوظة الأول.',
+          ),
+        ),
+      );
+      return;
+    }
     setState(() {
       merged.add(pick.path);
       busy = false;
@@ -13281,9 +13680,8 @@ class _ReviewPageState extends State<ReviewPage> {
   // الباتشات بعد القص اليدوي (لكل صورة): بتتعرض في المراجعة بدل الصورة الأصلية، وبتتحدّث أول ما تحفظ القص
   final Map<String, List<String>> _cropPages = <String, List<String>>{};
   bool showOrig = false;
-  final Set<String> _cvDone =
-      <String>{}; // الباتشات اللي اتجرّب لها القص التلقائي
-  final Map<String, bool> _autoLow = <String, bool>{}; // التلقائي مش واثق منه
+  bool _manualBusy = false;
+  final Map<String, String> _pdfChoiceNotes = {};
 
   final Map<String, Map<String, dynamic>> _drafts = {};
   ReceiptItem get item => widget.items[idx];
@@ -13292,6 +13690,7 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   Future<void> _leave() async {
+    if (_manualBusy) return;
     _stash();
     final dirtyItems = widget.items.where((x) {
       final d = _drafts[x.path];
@@ -13397,9 +13796,17 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   Future<void> _useOriginal() async {
-    saveCrop(item.path, null, original: true);
+    if (_manualBusy) return;
+    if (!saveCrop(item.path, null, original: true, mergeNames: <String>[])) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تعذّر حفظ اختيار الأصل. الاختيار السابق ما اتغيّرش.'),
+        ),
+      );
+      return;
+    }
     saveMerge(item.path, <String>[]);
-    _cvDone.remove(item.path);
+
     _cropPages.remove(item.path);
     changed = true;
     showOrig = false;
@@ -13407,58 +13814,40 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   Future<void> _loadCropView(String p) async {
-    final mq = cropOf(p);
-    if (mq == null) {
-      // تلقائي: للباتش المفتوح بس، في Isolate ومتكاشّي (نفس نتيجة الـ PDF)
-      if (_cvDone.contains(p)) return;
-      _cvDone.add(p);
-      try {
-        final l = await scanReceiptAsync(p);
-        if (!mounted) return;
-        _autoLow[p] = !fullOriginalOf(p) && (autoConf[p] ?? 1.0) < 0.55;
-        if (l.isEmpty) {
-          setState(() {});
-          return;
-        }
-        for (final f in l) {
-          await FileImage(File(f)).evict();
-        }
-        _cropPages[p] = l;
-        setState(() {
-          if (item.path == p) showOrig = false;
-          rev++;
-        });
-      } catch (_) {}
-      return;
-    }
-    _autoLow.remove(p);
-    try {
-      final pages = <String>[];
-      pages.addAll(await scanReceiptAsync(p, manual: mq));
-      for (final n in mergeOf(p)) {
-        for (final x in (widget.allItems ?? widget.items)) {
-          if (baseName(x.path) != n || !File(x.path).existsSync()) continue;
-          var l = <String>[];
-          final q2 = cropOf(x.path);
-          if (q2 != null) l = await scanReceiptAsync(x.path, manual: q2);
-          if (l.isEmpty) l = await scanReceiptAsync(x.path);
-          pages.addAll(l.isEmpty ? <String>[x.path] : l);
+    final selected = pdfImageSelection(p);
+    final pages = List<String>.from(selected.pages);
+    final issues = <String>[if (selected.issue != null) selected.issue!];
+    for (final n in mergeOf(p)) {
+      ReceiptItem? found;
+      for (final x in (widget.allItems ?? widget.items)) {
+        if (baseName(x.path) == n) {
+          found = x;
+          break;
         }
       }
-      if (!mounted) return;
-      if (pages.isEmpty) {
-        _cropPages.remove(p);
+      if (found == null) {
+        issues.add('صورة مضمومة مش موجودة: $n');
+        continue;
+      }
+      final other = pdfImageSelection(found.path);
+      if (other.needsChoice) {
+        issues.add('$n: ${other.issue}');
       } else {
-        for (final f in pages) {
-          await FileImage(File(f)).evict();
-        }
-        _cropPages[p] = pages;
+        pages.addAll(other.pages);
       }
-      setState(() {
-        showOrig = false;
-        rev++;
-      });
-    } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      if (issues.isEmpty) {
+        _cropPages[p] = pages;
+        _pdfChoiceNotes.remove(p);
+      } else {
+        _cropPages.remove(p);
+        _pdfChoiceNotes[p] = issues.join('\n');
+      }
+      if (item.path == p) showOrig = false;
+      rev++;
+    });
   }
 
   @override
@@ -13507,6 +13896,7 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   void save({bool next = true, bool close = true}) {
+    if (_manualBusy) return;
     final v = double.tryParse(amt.text.replaceAll(',', '.'));
     if (v == null || v <= 0) {
       ScaffoldMessenger.of(context)
@@ -13626,6 +14016,7 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   void cropBatch() {
+    if (_manualBusy) return;
     final me = item;
     final cands = <MapEntry<int, MergeCand>>[];
     for (final x in (widget.allItems ?? widget.items)) {
@@ -13687,49 +14078,92 @@ class _ReviewPageState extends State<ReviewPage> {
       cropMode = false;
       if (rotated) rev++;
     });
-    if (r == null) return;
-    if (r.clear) {
-      saveCrop(p, null);
-      saveMerge(p, null);
-      _cropPages.remove(p);
-      _cvDone.remove(p);
-      setState(() {
-        showOrig = false;
-        rev++;
-      });
-      _loadCropView(p); // يرجع للتلقائي
-    } else {
-      saveCrop(p, r.quads);
-      saveMerge(p, r.merged);
-      _loadCropView(p); // الصورة في المراجعة بتتبدّل بالباتش المقصوص فوراً
+    if (r == null) {
+      await _loadCropView(p);
+      return;
     }
-    changed = true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          r.clear
-              ? 'اتمسح القص والضم، الـ PDF هيرجع للوضع التلقائي.'
-              : 'اتحفظ ✓ (${r.quads!.length} باتش${r.merged.isNotEmpty ? ' + ${r.merged.length} مضموم' : ''}) هيتطبق على الـ PDF أول ما تخلّص المراجعة.',
-        ),
-      ),
-    );
-    setState(() {});
+    if (r.clear) {
+      if (!saveCrop(p, null, original: true, mergeNames: <String>[])) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذّر حفظ اختيار الصورة المستلمة.')),
+        );
+        return;
+      }
+      saveMerge(p, null);
+      changed = true;
+      await _loadCropView(p);
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'اتمسح الاختيار اليدوي والضم. الـ PDF هيستخدم الصورة المستلمة من غير سكنر.',
+            ),
+          ),
+        );
+      return;
+    }
+    if (r.quads == null) return;
+    setState(() => _manualBusy = true);
+    var created = <String>[];
+    var saved = false;
+    try {
+      final source = sourceIdentity(p);
+      final modified = File(p).statSync().modified.microsecondsSinceEpoch;
+      created = await scanReceiptAsync(p, manual: r.quads, userRequested: true);
+      if (!mounted ||
+          sourceIdentity(p) != source ||
+          File(p).statSync().modified.microsecondsSinceEpoch != modified) {
+        throw StateError('الصورة اتغيّرت أو المراجعة اتقفلت قبل الحفظ.');
+      }
+      if (!saveCrop(p, r.quads, pages: created, mergeNames: r.merged)) {
+        throw StateError('تعذّر حفظ نتيجة السكنر. الاختيار السابق لسه محفوظ.');
+      }
+      saved = true;
+      saveMerge(p, r.merged);
+      changed = true;
+      await _loadCropView(p);
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'اتحفظت نتيجة السكنر اليدوي (${created.length} صورة). الـ PDF هيستخدمها زي ما هي من غير سكنر تاني.',
+            ),
+          ),
+        );
+    } catch (e) {
+      if (!saved)
+        for (final f in created) {
+          try {
+            File(f).deleteSync();
+          } catch (_) {}
+        }
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('السكنر اليدوي ما اتحفظش: $e')));
+    } finally {
+      if (mounted) setState(() => _manualBusy = false);
+    }
   }
 
   Future<void> rotate() async {
+    if (_manualBusy) return;
     try {
-      saveCrop(
-        item.path,
-        null,
-      ); // التدوير بيغيّر اتجاه الصورة فالقص القديم مبقاش صالح
+      final merged = mergeOf(item.path);
+      if (!await fixImageAsync(item.path, item.path, 90)) {
+        throw StateError('التدوير ما اكتملش.');
+      }
+      if (!saveCrop(item.path, null, original: true, mergeNames: merged)) {
+        throw StateError(
+          'الصورة اتدوّرت لكن تعذّر حفظ اختيارها للـ PDF. راجع الاختيار.',
+        );
+      }
       _cropPages.remove(item.path);
-      _cvDone.remove(item.path);
-      await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
       changed = true;
       setState(() => rev++);
-      _loadCropView(item.path);
+      await _loadCropView(item.path);
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -13905,74 +14339,157 @@ class _ReviewPageState extends State<ReviewPage> {
     AppSettings.of(context);
     final it = item;
     final image = Container(
+      key: const ValueKey('pos2-review-image'),
       color: Colors.black12,
-      child: Stack(
+      child: ValueListenableBuilder<bool>(
+        valueListenable: _zoomed,
+        builder: (c, z, _) => PageView.builder(
+          controller: _pc,
+          physics: z || _manualBusy
+              ? const NeverScrollableScrollPhysics()
+              : const PageScrollPhysics(),
+          itemCount: widget.items.length,
+          onPageChanged: (i) {
+            _zoomed.value = false;
+            setState(() {
+              _stash();
+              idx = i;
+              load();
+            });
+          },
+          itemBuilder: (c, i) => ZoomableImage(
+            key: ValueKey(
+              '${widget.items[i].path}#${i == idx ? rev : 0}#${showOrig ? 'o' : 'c'}',
+            ),
+            path: widget.items[i].path,
+            paths: showOrig ? null : _cropPages[widget.items[i].path],
+            onZoom: (zz) {
+              if (i == idx) _zoomed.value = zz;
+            },
+          ),
+        ),
+      ),
+    );
+    final chosen = pdfImageSelection(it.path);
+    final choiceNote = _pdfChoiceNotes[it.path];
+    final imageTools = Container(
+      key: const ValueKey('pos2-image-tools'),
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        border: Border.all(color: Theme.of(context).colorScheme.outline),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Positioned.fill(
-            child: ValueListenableBuilder<bool>(
-              valueListenable: _zoomed,
-              builder: (c, z, _) => PageView.builder(
-                controller: _pc,
-                // لما الصورة مكبّرة السحب بيحرّك الصورة، ولما ترجع 1x السحب يقلب للباتش اللي بعده/قبله
-                physics: z
-                    ? const NeverScrollableScrollPhysics()
-                    : const PageScrollPhysics(),
-                itemCount: widget.items.length,
-                onPageChanged: (i) {
-                  _zoomed.value = false;
-                  setState(() {
-                    _stash();
-                    idx = i;
-                    load();
-                  });
-                },
-                itemBuilder: (c, i) => ZoomableImage(
-                  key: ValueKey(
-                    '${widget.items[i].path}#${i == idx ? rev : 0}#${showOrig ? 'o' : 'c'}',
-                  ),
-                  path: widget.items[i].path,
-                  paths: showOrig ? null : _cropPages[widget.items[i].path],
-                  onZoom: (zz) {
-                    if (i == idx) _zoomed.value = zz;
-                  },
-                ),
-              ),
-            ),
+          Text(
+            choiceNote != null
+                ? 'الـ PDF مستني اختيار الصورة'
+                : chosen.manual
+                ? 'مصدر الـ PDF: نتيجة سكنر يدوي محفوظة'
+                : 'مصدر الـ PDF: الصورة المستلمة كما هي',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
           ),
-          Positioned(
-            top: 4,
-            left: 4,
-            child: IconButton.filledTonal(
-              tooltip: tr('ملء الشاشة'),
-              icon: const Icon(Icons.fullscreen),
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ReceiptZoomPage(
-                    path: (!showOrig && (_cropPages[it.path]?.length ?? 0) == 1)
-                        ? _cropPages[it.path]!.first
-                        : it.path,
-                    title: it.orderNum != null
-                        ? machineLabel(it.orderNum, it.unitName)
-                        : (it.unitName ?? '؟'),
-                  ),
-                ),
-              ),
-            ),
+          const SizedBox(height: 5),
+          const Text(
+            'المراجعة والـ PDF مش بيشغّلوا السكنر لوحدهم. استخدم الزر اليدوي.',
+            style: TextStyle(fontSize: 12),
           ),
-          if (!_cropPages.containsKey(it.path) && _autoLow[it.path] == true)
-            Positioned(
-              top: 4,
-              right: 4,
-              child: ActionChip(
-                avatar: const Icon(Icons.warning_amber, size: 16),
-                label: const Text(
-                  'الصورة كاملة آمنة للـ PDF. تقدر تقص يدوي',
-                  style: TextStyle(fontSize: 12),
+          if (choiceNote != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Text(
+                choiceNote,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 12,
                 ),
-                onPressed: cropBatch,
               ),
             ),
+          if (_manualBusy) ...[
+            const SizedBox(height: 8),
+            const LinearProgressIndicator(),
+            const Text(
+              'جاري حفظ نتيجة السكنر اليدوي...',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 8),
+          LayoutBuilder(
+            builder: (context, box) {
+              final width = (box.maxWidth - 6) / 2;
+              final style = ButtonStyle(
+                padding: const WidgetStatePropertyAll(
+                  EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                ),
+                minimumSize: const WidgetStatePropertyAll(Size(0, 44)),
+                textStyle: WidgetStatePropertyAll(
+                  Theme.of(context).textTheme.labelLarge!
+                      .copyWith(fontSize: 12),
+                ),
+              );
+              return Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  SizedBox(
+                    width: width,
+                    child: FilledButton.tonalIcon(
+                      style: style,
+                      onPressed: _manualBusy ? null : cropBatch,
+                      icon: const Icon(Icons.crop, size: 16),
+                      label: const Text('سكنر يدوي'),
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: OutlinedButton(
+                      style: style,
+                      onPressed: _manualBusy ? null : _useOriginal,
+                      child: const Text('الصورة المستلمة'),
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: OutlinedButton(
+                      style: style,
+                      onPressed: _manualBusy
+                          ? null
+                          : () => setState(() => showOrig = false),
+                      child: const Text('معاينة PDF'),
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: OutlinedButton.icon(
+                      style: style,
+                      icon: const Icon(Icons.fullscreen, size: 16),
+                      label: const Text('تكبير الصورة'),
+                      onPressed: _manualBusy
+                          ? null
+                          : () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => ReceiptZoomPage(
+                                  path:
+                                      (!showOrig &&
+                                          (_cropPages[it.path]?.length ?? 0) ==
+                                              1)
+                                      ? _cropPages[it.path]!.first
+                                      : it.path,
+                                  title: it.orderNum != null
+                                      ? machineLabel(it.orderNum, it.unitName)
+                                      : (it.unitName ?? '؟'),
+                                ),
+                              ),
+                            ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
         ],
       ),
     );
@@ -13982,6 +14499,7 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          imageTools,
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
@@ -14083,7 +14601,7 @@ class _ReviewPageState extends State<ReviewPage> {
             const Padding(
               padding: EdgeInsets.only(bottom: 8),
               child: Text(
-                'قص قديم محتاج مراجعة. الـ PDF هيستخدم الأصل كامل لحد ما تعتمد قص جديد.',
+                'اختيار قديم محتاج مراجعة. اختار الصورة المستلمة أو احفظ سكنر يدوي قبل تجهيز الـ PDF.',
                 style: TextStyle(color: Colors.orange),
               ),
             ),
@@ -14094,8 +14612,9 @@ class _ReviewPageState extends State<ReviewPage> {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 [
-                  if (cropOf(it.path) != null)
-                    '✂️ قص يدوي مطبّق على الباتش ده في الـ PDF',
+                  if (pdfImageSelection(it.path).manual &&
+                      !pdfImageSelection(it.path).needsChoice)
+                    '✂️ نتيجة سكنر يدوي محفوظة للـ PDF',
                   if (mergeOf(it.path).isNotEmpty)
                     '➕ فيه ${mergeOf(it.path).length} باتش مضموم جنبه في نفس صفحة الـ PDF',
                   if (mergedInto(it.path) != null) '➕ الباتش ده مضموم لصفحة صورة تانية في الـ PDF (مش بيطلع صفحة لوحده)',
@@ -14370,28 +14889,14 @@ class _ReviewPageState extends State<ReviewPage> {
                   child: Row(
                     children: [
                       OutlinedButton.icon(
-                        onPressed: rotate,
+                        onPressed: _manualBusy ? null : rotate,
                         icon: const Icon(Icons.rotate_right),
                         label: const Text('تدوير'),
                       ),
                       const SizedBox(width: 8),
-                      if (cropOf(it.path) != null ||
-                          mergeOf(it.path).isNotEmpty)
-                        FilledButton.tonalIcon(
-                          onPressed: cropBatch,
-                          icon: const Icon(Icons.crop),
-                          label: const Text('قص ✓'),
-                        )
-                      else
-                        OutlinedButton.icon(
-                          onPressed: cropBatch,
-                          icon: const Icon(Icons.crop),
-                          label: const Text('قص'),
-                        ),
-                      const SizedBox(width: 8),
                       Expanded(
                         child: FilledButton(
-                          onPressed: () => save(),
+                          onPressed: _manualBusy ? null : () => save(),
                           child: Text(
                             !widget.single && idx < widget.items.length - 1
                                 ? 'حفظ والتالي'
@@ -14427,12 +14932,14 @@ class _ReviewPageState extends State<ReviewPage> {
                   IconButton(
                     icon: const Icon(Icons.navigate_before),
                     tooltip: tr('السابق'),
-                    onPressed: idx > 0 ? () => go(idx - 1) : null,
+                    onPressed: !_manualBusy && idx > 0
+                        ? () => go(idx - 1)
+                        : null,
                   ),
                   IconButton(
                     icon: const Icon(Icons.navigate_next),
                     tooltip: tr('التالي'),
-                    onPressed: idx < widget.items.length - 1
+                    onPressed: !_manualBusy && idx < widget.items.length - 1
                         ? () => go(idx + 1)
                         : null,
                   ),
@@ -14464,33 +14971,6 @@ class _ReviewPageState extends State<ReviewPage> {
                           const Text(
                             '٢ المبلغ والماكينة',
                             style: TextStyle(fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                      child: Wrap(
-                        spacing: 6,
-                        runSpacing: 2,
-                        alignment: WrapAlignment.center,
-                        children: [
-                          OutlinedButton.icon(
-                            onPressed: _useOriginal,
-                            icon: const Icon(Icons.image_outlined, size: 17),
-                            label: Text(
-                              fullOriginalOf(it.path)
-                                  ? 'الأصل كامل'
-                                  : 'استخدم الأصل كامل في PDF',
-                            ),
-                          ),
-                          OutlinedButton(
-                            onPressed: () => setState(() => showOrig = false),
-                            child: const Text('معاينة PDF'),
-                          ),
-                          OutlinedButton(
-                            onPressed: cropBatch,
-                            child: const Text('تعديل القص'),
                           ),
                         ],
                       ),
