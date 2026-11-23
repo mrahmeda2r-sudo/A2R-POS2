@@ -1595,12 +1595,15 @@ class SysTotal {
   final String
   printed; // وقت الطباعة (لو فيه أكتر من صورة لنفس الترمنل ناخد الأحدث)
   final String file;
-  final int?
+  int?
   txn; // إيصالات إلكترونية (ده الرقم اللي بنقارن بيه عدد إيصالات الدفع)
-  final int? txnAll; // إجمالي العمليات
+  int? txnAll; // إجمالي العمليات
   final String path; // المسار الكامل لصورة السيستم (علشان تتفتح من الكارت)
   List<double> cands; // احتمالات المبالغ المقروءة من الصورة
   bool manual; // اتعدّلت يدوياً؟
+  // مش بيتحفظوا: بيتحسبوا من جديد كل مرة من مقارنة المبلغ بالباتشات
+  String? review; // سبب "راجع الماكينة" (ترمنل قريب من ماكينة تانية والمبلغ مش مطابق)
+  String? tidFixFrom; // الترمنل اللي اتقرا قبل ما يتصحح بالمبلغ (زي 0 اتقرت 1 في آخر رقم)
 
   SysTotal(
     this.tid,
@@ -2104,6 +2107,8 @@ void _publishClosing(
     amts.remove(n);
   }
   batchAmtByNum = amts;
+  // ترمنل صورة السيستم المقروء غلط في رقم واحد: يتصحح بالمبلغ قبل ما نربطه بالماكينات
+  _logSysFixes(reconcileSysTids(sys, batchAmtByTidOf(items)));
   // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
   final latest = <String, SysTotal>{};
   for (final sy in sys) {
@@ -7825,7 +7830,14 @@ void saveSysFix(SysTotal value) {
   if (value.file.isEmpty) return;
   try {
     final m = loadFixes();
-    final record = {'tid': value.tid, 'amt': value.amount};
+    final record = {
+      'tid': value.tid,
+      'amt': value.amount,
+      // الأعداد بتتحفظ برضه علشان الحفظ اليدوي ميرجّعش العدد القديم (زي 19 بدل 79)
+      'tx': value.txn,
+      'ta': value.txnAll,
+      'cnt': true,
+    };
     m['sys:${value.file}'] = record;
     final path = _sysImagePath(value);
     if (path != null) m['sysimage:${sourceIdentity(path)}'] = record;
@@ -7851,6 +7863,10 @@ void applySysFix(SysTotal s) {
   if (a is num && a > 0) {
     s.amount = round2(a.toDouble());
     s.manual = true;
+  }
+  if (fx['cnt'] == true) {
+    s.txn = (fx['tx'] as num?)?.toInt();
+    s.txnAll = (fx['ta'] as num?)?.toInt();
   }
 }
 
@@ -10779,7 +10795,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         subtitle: w.Text(
           '${s.amount != null ? '${_fmtMoney(s.amount!)} ج.م' : '⚠️ المبلغ غير مقروء'}'
           '${s.tid == null ? ' • ⚠️ الترمنل غير مقروء' : ''}'
-          '${s.txn != null ? ' • إلكترونية: ${s.txn}' : ''}',
+          '${s.txn != null ? ' • إلكترونية: ${s.txn}' : ''}'
+          '${s.tidFixFrom != null ? ' • اتقرا ${s.tidFixFrom} واتصحح بالمبلغ' : ''}'
+          '${s.review != null ? ' • ⚠️ ${s.review}' : ''}',
           style: const TextStyle(fontSize: 12),
         ),
         trailing: Icon(
@@ -11114,13 +11132,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> editSysTotal(SysTotal sy) async {
+    final tx0 = sy.txn, ta0 = sy.txnAll;
     final changed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => SysReviewPage(sys: sy, allItems: processedItems),
       ),
     );
-    if (changed == true) {
+    // إعادة القراءة بتحدّث الأعداد على طول، فنحفظها حتى لو خرجت من غير "حفظ"
+    if (changed == true || sy.txn != tx0 || sy.txnAll != ta0) {
       _saveClosing(force: true);
       await _refresh();
     } else if (mounted) {
@@ -11441,6 +11461,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void writeReport(String date) {
     try {
+      _logSysFixes(reconcileSysTids(sysReads, batchAmtByTidOf(processedItems)));
       final line = '=' * 50;
       final sb = StringBuffer('تقرير المراجعة - $date\n$line\n');
       var total = 0.0;
@@ -11467,6 +11488,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // مقارنة بالسيستم: أي فرق في المبلغ (ولو قرش) أو في عدد المعاملات لازم يظهر، مش ✓
         final sy0 = (r.ignoredDoc || r.userExcluded) ? null : _sysOf(r);
         if (sy0 != null) {
+          if (sy0.tidFixFrom != null) {
+            flags.add(
+              'ترمنل صورة السيستم اتقرا ${sy0.tidFixFrom} واتصحح بالمبلغ',
+            );
+          }
           if (sy0.amount == null) {
             flags.add('مبلغ السيستم محتاج مراجعة');
           } else {
@@ -11820,6 +11846,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
+    _sysFixLogged.clear();
     try {
       File('$outputDir/ocr_debug.txt').writeAsStringSync(
         '# فحص التقفيل ${DateTime.now().toString().substring(0, 19)}\n'
@@ -13476,6 +13503,18 @@ class _SysReviewPageState extends State<SysReviewPage> {
     setState(() => reading = true);
     final rec = TextRecognizer(script: TextRecognitionScript.latin);
     SysTotal? best;
+    String bestText = '';
+    String bestVar = '';
+    List<int?>? cnt; // [إجمالي العمليات، الإلكترونية] من أول قراءة أعدادها راكبة على بعض
+    String cntVar = '';
+    var tries = 0;
+    bool done() {
+      final b = best;
+      return b != null &&
+          b.tid != null &&
+          b.amount != null &&
+          (cnt != null || tries >= 2);
+    }
     try {
       Directory(tmpDir).createSync(recursive: true);
       for (final deg in const [0, 90, 270, 180]) {
@@ -13488,6 +13527,7 @@ class _SysReviewPageState extends State<SysReviewPage> {
             await enhanceImageAsync(tp, rp);
           }
           final res = await rec.processImage(InputImage.fromFilePath(rp));
+          tries++;
           final sp = parseSysConsole(
             res.text,
             widget.sys.file,
@@ -13495,32 +13535,93 @@ class _SysReviewPageState extends State<SysReviewPage> {
             path: imgPath,
           );
           if (sp == null) continue;
-          if (best == null ||
-              (best.tid == null && sp.tid != null) ||
-              (best.amount == null && sp.amount != null)) {
+          final vname = 'دوران $deg°${enh ? ' محسّنة' : ' أصلية'}';
+          if (cnt == null && sp.txn != null) {
+            cnt = [sp.txnAll, sp.txn];
+            cntVar = vname;
+          }
+          final cur = best;
+          if (cur == null ||
+              (cur.tid == null && sp.tid != null) ||
+              (cur.amount == null && sp.amount != null)) {
             best = sp;
+            bestText = res.text;
+            bestVar = vname;
           }
           for (final c in sp.cands) {
             if (!cands.any((x) => (x - c).abs() < 0.005)) cands.add(c);
           }
-          if (best.tid != null && best.amount != null) break;
+          if (done()) break;
         }
-        if (best != null && best.tid != null && best.amount != null) break;
+        if (done()) break;
       }
     } finally {
       await rec.close();
     }
+    // تأكيد الترمنل بالمبلغ (رقم واحد غلط ممكن يطلع ماكينة تانية حقيقية)
+    String? fixedFrom;
+    String? reviewNote;
+    final b0 = best;
+    if (b0 != null) {
+      final probe = SysTotal(b0.tid, b0.amount, b0.date, b0.printed, b0.file);
+      _logSysFixes(
+        reconcileSysTids([probe], batchAmtByTidOf(widget.allItems)),
+      );
+      if (probe.tid != b0.tid) {
+        fixedFrom = b0.tid;
+        b0.tid = probe.tid;
+      }
+      reviewNote = probe.review;
+      // الأعداد: من القراءة الجديدة (ولو مش راكبة على بعض تبقى فاضية «—» بدل رقم غلط زي 19)
+      widget.sys.txnAll = cnt?[0];
+      widget.sys.txn = cnt?[1];
+      try {
+        await loadScanCache();
+        final src =
+            widget.sys.path.isNotEmpty && File(widget.sys.path).existsSync()
+            ? widget.sys.path
+            : imgPath;
+        final key = '${baseName(src)}:${File(src).lengthSync()}';
+        final prev = _scanCache[key];
+        if (prev is Map && prev['k'] == 'console') {
+          _cachePut(key, {
+            ...Map<String, dynamic>.from(prev),
+            'tx': widget.sys.txn,
+            'ta': widget.sys.txnAll,
+          });
+          await saveScanCache();
+        }
+      } catch (_) {}
+    }
+    try {
+      File('$outputDir/ocr_debug.txt')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(
+          '##### ${widget.sys.file} (إعادة قراءة صورة السيستم: ${b0 == null ? 'مفيش قراءة نافعة' : bestVar}، $tries قراءة)\n'
+          'tid=${b0?.tid}${fixedFrom != null ? ' (اتقرا $fixedFrom واتصحح بالمبلغ)' : ''}'
+          '${reviewNote != null ? ' [$reviewNote]' : ''}'
+          ' amt=${b0?.amount?.toStringAsFixed(2)}'
+          ' عمليات=${cnt?[0] ?? '—'} إلكترونية=${cnt?[1] ?? '—'}${cnt != null ? ' ($cntVar)' : ' (الأعداد مش راكبة على بعض أو مش مقروءة)'}\n'
+          '$bestText\n\n',
+          mode: FileMode.append,
+        );
+    } catch (_) {}
     if (!mounted) return;
     setState(() {
       reading = false;
-      if (best?.tid != null && terminals.containsKey(best!.tid)) tid = best.tid;
-      if (best?.amount != null) amtCtl.text = best!.amount!.toStringAsFixed(2);
+      if (b0?.tid != null && terminals.containsKey(b0!.tid)) tid = b0.tid;
+      if (b0?.amount != null) amtCtl.text = b0!.amount!.toStringAsFixed(2);
     });
+    final cntTxt = b0 == null
+        ? ''
+        : ' • إلكترونية: ${cnt?[1] ?? '—'}';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: w.Text(
-          best?.tid != null
-              ? '✅ اتقرا الترمنل ${best!.tid}${best.amount != null ? ' • المبلغ ${best.amount!.toStringAsFixed(2)}' : ''}'
+          b0?.tid != null
+              ? '✅ اتقرا الترمنل ${b0!.tid}${b0.amount != null ? ' • المبلغ ${b0.amount!.toStringAsFixed(2)}' : ''}$cntTxt'
+                    '${fixedFrom != null ? '\nالترمنل اتقرا $fixedFrom واتصحح بالمبلغ — اتأكد واضغط حفظ' : ''}'
+                    '${reviewNote != null ? '\n⚠️ $reviewNote' : ''}'
               : 'مقدرتش أقرا الترمنل تلقائياً، اختار الماكينة من القايمة.',
         ),
       ),
@@ -16459,7 +16560,96 @@ void saveMOut(String? f) {
 }
 
 // عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
-bool _sysNeedsReview(SysTotal s) => s.tid == null || s.amount == null;
+bool _sysNeedsReview(SysTotal s) =>
+    s.tid == null || s.amount == null || s.review != null;
+
+// مبلغ الباتش لكل ترمنل (نفس قواعد batchAmtByNum: أي باتش مش مؤكد للماكينة بيلغي مبلغها)
+Map<String, double> batchAmtByTidOf(List<ReceiptItem> items) {
+  final byNum = <int, double>{};
+  final bad = <int>{};
+  for (final it in items) {
+    if (!it.counts) continue;
+    final n =
+        it.orderNum ?? (it.tid != null ? terminals[it.tid]?.orderNum : null);
+    if (n == null) continue;
+    if (!it.ok || it.amount <= 0) {
+      bad.add(n);
+      continue;
+    }
+    byNum[n] = (byNum[n] ?? 0) + it.amount;
+  }
+  for (final n in bad) {
+    byNum.remove(n);
+  }
+  final out = <String, double>{};
+  for (final e in terminals.entries) {
+    final v = byNum[e.value.orderNum];
+    if (v != null) out[e.key] = round2(v);
+  }
+  return out;
+}
+
+int _tidDigitDist(String a, String b) {
+  if (a.length != b.length) return _editDist(a, b);
+  var d = 0;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) d++;
+  }
+  return d;
+}
+
+// ترمنل صورة السيستم ممكن يتقرا غلط في رقم واحد ويطلع ماكينة تانية حقيقية (50335710 أبيس 1 ← 50335711 برج العرب 4).
+// الـ OCR لاتيني فمش بيقرا اسم الوحدة العربي، فبنتأكد بالمبلغ: لو مبلغ السيستم مش مطابق لباتش الترمنل المقروء
+// ومطابق بالظبط لباتش ماكينة واحدة بس فرقها رقم واحد → دي الماكينة الصح. لو مطابق لأكتر من واحدة (أو مفيش باتش
+// للترمنل المقروء وفيه جيران ليهم باتش) → "راجع الماكينة" ومش بنغيّر حاجة. الترمنل اللي اتحدد بإيدك مبيتغيرش.
+List<String> reconcileSysTids(
+  List<SysTotal> sys,
+  Map<String, double> batchByTid,
+) {
+  final logs = <String>[];
+  bool eq(double a, double b) => (a - b).abs() < 0.005;
+  for (final s in sys) {
+    s.review = null;
+    if (s.manual) continue;
+    final tid = s.tid, amt = s.amount;
+    if (tid == null || amt == null || !terminals.containsKey(tid)) continue;
+    final own = batchByTid[tid];
+    if (own != null && eq(own, amt)) continue;
+    final nbrs = [
+      for (final k in terminals.keys)
+        if (k != tid && _tidDigitDist(k, tid) <= 1) k,
+    ];
+    if (nbrs.isEmpty) continue;
+    final hits = [
+      for (final k in nbrs)
+        if (batchByTid[k] != null && eq(batchByTid[k]!, amt)) k,
+    ];
+    if (hits.length == 1) {
+      s.tidFixFrom ??= tid;
+      s.tid = hits.first;
+      logs.add(
+        'SYS_TID_FIX $tid→${hits.first} بالمبلغ ${amt.toStringAsFixed(2)} (${s.file})',
+      );
+    } else if (hits.length > 1) {
+      s.review = 'راجع الماكينة: المبلغ مطابق لأكتر من ماكينة';
+    } else if (own == null && nbrs.any(batchByTid.containsKey)) {
+      s.review = 'راجع الماكينة: مفيش باتش للترمنل $tid';
+    }
+  }
+  return logs;
+}
+
+final Set<String> _sysFixLogged = <String>{};
+void _logSysFixes(List<String> logs) {
+  for (final l in logs) {
+    if (!_sysFixLogged.add(l)) continue;
+    try {
+      File('$outputDir/ocr_debug.txt')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('$l\n', mode: FileMode.append);
+    } catch (_) {}
+  }
+}
 
 Map<int, int> sysTxnByNum = <int, int>{};
 Map<int, int> batchTxnByNum =
