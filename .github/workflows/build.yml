@@ -242,6 +242,11 @@ jobs:
                                   val dst = call.argument<String>("dst") ?: ""
                                   nativeEnhance(src, dst, result)
                               }
+                              "nativeRectPrep" -> {
+                                  val src = call.argument<String>("src") ?: ""
+                                  val dst = call.argument<String>("dst") ?: ""
+                                  nativeRectPrep(src, dst, result)
+                              }
                               else -> result.notImplemented()
                           }
                       }
@@ -660,6 +665,8 @@ jobs:
                           if (bmp != null) {
                               out = android.graphics.Bitmap.createBitmap(bmp.width, bmp.height, android.graphics.Bitmap.Config.ARGB_8888)
                               val canvas = android.graphics.Canvas(out)
+                              // خلفية بيضا (لو الصورة PNG شفافة). الصور العادية بتغطيها بالكامل فمفيش أي تغيير فيها
+                              canvas.drawColor(android.graphics.Color.WHITE)
                               val paint = android.graphics.Paint()
                               val cm = android.graphics.ColorMatrix(
                                   floatArrayOf(
@@ -692,6 +699,34 @@ jobs:
                       var out: android.graphics.Bitmap? = null
                       try {
                           bmp = android.graphics.BitmapFactory.decodeFile(src)
+                          // صور الكاميرا المتلفّة (EXIF): نلفّها زي ما بتتعرض بالظبط قبل التحسين، علشان ما تقعش على طريقة Dart البطيئة
+                          if (bmp != null) {
+                              val ori = try {
+                                  android.media.ExifInterface(src).getAttributeInt(
+                                      android.media.ExifInterface.TAG_ORIENTATION,
+                                      android.media.ExifInterface.ORIENTATION_NORMAL
+                                  )
+                              } catch (_: Exception) {
+                                  android.media.ExifInterface.ORIENTATION_NORMAL
+                              }
+                              if (ori in 2..8) {
+                                  val m = android.graphics.Matrix()
+                                  when (ori) {
+                                      2 -> m.setScale(-1f, 1f)
+                                      3 -> m.setRotate(180f)
+                                      4 -> { m.setRotate(180f); m.postScale(-1f, 1f) }
+                                      5 -> { m.setRotate(90f); m.postScale(-1f, 1f) }
+                                      6 -> m.setRotate(90f)
+                                      7 -> { m.setRotate(-90f); m.postScale(-1f, 1f) }
+                                      8 -> m.setRotate(-90f)
+                                  }
+                                  val rot = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                                  if (rot !== bmp) {
+                                      bmp.recycle()
+                                      bmp = rot
+                                  }
+                              }
+                          }
                           if (bmp != null) {
                               val w = bmp.width
                               val h = bmp.height
@@ -699,6 +734,7 @@ jobs:
                               val th = Math.max(1, (h.toLong() * tw / w).toInt())
                               out = android.graphics.Bitmap.createBitmap(tw, th, android.graphics.Bitmap.Config.ARGB_8888)
                               val canvas = android.graphics.Canvas(out)
+                              canvas.drawColor(android.graphics.Color.WHITE)
                               val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
                               val cm = android.graphics.ColorMatrix()
                               cm.setSaturation(0f)
@@ -722,6 +758,89 @@ jobs:
                               ok = true
                           }
                       } catch (_: Exception) {
+                      } finally {
+                          try { bmp?.recycle() } catch (_: Exception) {}
+                          try { out?.recycle() } catch (_: Exception) {}
+                      }
+                      runOnUiThread { result.success(ok) }
+                  }.start()
+              }
+
+              // ───────── تجهيز صورة عدّ المستطيلات: نفس تصغير Dart بالظبط (copyResize average لعرض 700) ─────────
+              // فك الصورة كاملة (من غير inSampleSize) + متوسط كل مربع بنفس الحدود والتقريب، والناتج PNG (من غير فقد)
+              private fun nativeRectPrep(src: String, dst: String, result: MethodChannel.Result) {
+                  Thread {
+                      var ok = false
+                      var bmp: android.graphics.Bitmap? = null
+                      var out: android.graphics.Bitmap? = null
+                      try {
+                          val ori = try {
+                              android.media.ExifInterface(src).getAttributeInt(
+                                  android.media.ExifInterface.TAG_ORIENTATION,
+                                  android.media.ExifInterface.ORIENTATION_NORMAL
+                              )
+                          } catch (_: Exception) {
+                              -1
+                          }
+                          // صورة متلفّة (EXIF): Dart بيلفّها قبل التصغير، فبنسيبها لـ Dart علشان النتيجة ما تتغيرش
+                          if (ori == 0 || ori == 1) {
+                              val opts = android.graphics.BitmapFactory.Options()
+                              opts.inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                              bmp = android.graphics.BitmapFactory.decodeFile(src, opts)
+                          }
+                          if (bmp != null) {
+                              val sw = bmp.width
+                              val sh = bmp.height
+                              val tw = 700
+                              val th = Math.round(tw.toDouble() * (sh.toDouble() / sw.toDouble())).toInt()
+                              if (sw > 0 && th > 0) {
+                                  val dx = sw.toDouble() / tw.toDouble()
+                                  val dy = sh.toDouble() / th.toDouble()
+                                  val ax1s = IntArray(tw)
+                                  val ax2s = IntArray(tw)
+                                  for (x in 0 until tw) {
+                                      val a1 = (x * dx).toInt()
+                                      var a2 = ((x + 1) * dx).toInt()
+                                      if (a2 == a1) a2++
+                                      ax1s[x] = a1
+                                      ax2s[x] = a2
+                                  }
+                                  val maxRows = Math.ceil(dy).toInt() + 2
+                                  val buf = IntArray(sw * maxRows)
+                                  val outPx = IntArray(tw * th)
+                                  for (y in 0 until th) {
+                                      val ay1 = (y * dy).toInt()
+                                      var ay2 = ((y + 1) * dy).toInt()
+                                      if (ay2 == ay1) ay2++
+                                      val nr = ay2 - ay1
+                                      bmp.getPixels(buf, 0, sw, 0, ay1, sw, nr)
+                                      for (x in 0 until tw) {
+                                          var r = 0
+                                          var g = 0
+                                          var b = 0
+                                          var np = 0
+                                          for (ry in 0 until nr) {
+                                              val base = ry * sw
+                                              for (sx in ax1s[x] until ax2s[x]) {
+                                                  val c = buf[base + sx]
+                                                  r += (c shr 16) and 0xFF
+                                                  g += (c shr 8) and 0xFF
+                                                  b += c and 0xFF
+                                                  np++
+                                              }
+                                          }
+                                          outPx[y * tw + x] = (0xFF shl 24) or ((r / np) shl 16) or ((g / np) shl 8) or (b / np)
+                                      }
+                                  }
+                                  out = android.graphics.Bitmap.createBitmap(outPx, tw, th, android.graphics.Bitmap.Config.ARGB_8888)
+                                  File(dst).outputStream().use { os ->
+                                      out.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os)
+                                  }
+                                  ok = true
+                              }
+                          }
+                      } catch (_: Exception) {
+                      } catch (_: OutOfMemoryError) {
                       } finally {
                           try { bmp?.recycle() } catch (_: Exception) {}
                           try { out?.recycle() } catch (_: Exception) {}
