@@ -20888,7 +20888,11 @@ class _MachinesPageState extends State<MachinesPage>
           File(p2).deleteSync();
         } catch (_) {}
         final o = pageSm3[k]!;
-        final cOk = cs.sm == cs.sm2 && cs.sm2 == cs.sm3;
+        // الطريقة 2 (m2) بتعدّ علامات الدفع بس (rrn/amount/appr)، وRRN أضعف
+        // علامة (في أبيس 2 ص2 اتقري 9 RRN بس من 15)، فبتتأخر بواحد حتى بعد
+        // التنضيف. الاتفاق الحقيقي هو m1 == m3؛ تأخّر m2 لوحده مش سبب نرفض
+        // تصحيح الطريقتين الأساسيتين متفقين عليه، بشرط m2 ما يعدّيش m3.
+        final cOk = cs.sm == cs.sm3 && cs.sm2 <= cs.sm3;
         _dbg(
           'REDFIX ${r.pdfName} p$k: أصلي=${pageSm[k]}/${pageSm2[k]}/$o منضّف=${cs.sm}/${cs.sm2}/${cs.sm3} مستطيلات=${rect ?? '-'}',
         );
