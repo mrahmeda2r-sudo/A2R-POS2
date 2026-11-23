@@ -610,6 +610,13 @@ Widget _countMethodsPanel({
             countEngine == 1,
             () => setCountEngine(1),
           ),
+          if (countEngine == 0)
+            chk(
+              '3 قرّايين بدل 2 (تجريبي)',
+              'أسرع على الموبايلات القوية، وبياخد ذاكرة أكتر. لو التطبيق قفل شيله',
+              par3Count,
+              setPar3Count,
+            ),
           head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
           radio(
             'طريقة 3: تسلسل رأسي (الافتراضية)',
@@ -2226,6 +2233,7 @@ Future<void> resetAllSettings(BuildContext context) async {
       'countMethod',
       'redFixCount',
       'consensusGuard',
+      'par3Count',
       'defFolder',
       'defImage',
       'defPdf',
@@ -4546,6 +4554,30 @@ double round2(double val) => double.parse(val.toStringAsFixed(2));
 
 // دمج القراءة التانية (الصورة المحسّنة) في القراءة الأولى.
 // بترجع قيمة المبلغ التانية لو متعارضة مع الأولى (علشان تتراجع)، وإلا null.
+// BATCH CLOSED: الشكل الأصلي + أخطاء OCR الشائعة (CL0SED / BATCHCLOSED / BATCH CL OSED / B4TCH ...)
+final RegExp _kBatchClosedStrict = RegExp(r'BATCH\s*CLOS', caseSensitive: false);
+final RegExp _kBatchClosedLoose = RegExp(
+  r'B\s?[A4]\s?T\s?C\s?H\s*C\s?[L1I|]\s?[O0Q]\s?[S5]',
+  caseSensitive: false,
+);
+bool _hasBatchClosedStrict(String t) =>
+    _kBatchClosedStrict.hasMatch(t.toUpperCase());
+bool _hasBatchClosedText(String t) {
+  final u = t.toUpperCase();
+  return _kBatchClosedStrict.hasMatch(u) || _kBatchClosedLoose.hasMatch(u);
+}
+
+// القراءة التانية لازمة؟ نفس الشروط القديمة بالظبط، والفرق الوحيد: لو BATCH CLOSED اتقرت بحروف غلط بسيطة
+// بنعتبرها موجودة - بس بشرط إن التاريخ ورقم العمليات اتقروا (علشان القراءة التانية كانت بتكمّلهم)
+bool _needSecondRead(Analysis a, String text, bool hasReprint) {
+  if (!a.ok || a.tid == null || a.row == null || a.val <= 0 || hasReprint) {
+    return true;
+  }
+  if (_hasBatchClosedStrict(text)) return false;
+  if (!_hasBatchClosedText(text)) return true;
+  return a.date == null || a.txn == null;
+}
+
 double? mergeSecondRead(Analysis a, Analysis b) {
   a.cands = mergeCands(a.cands, b.cands);
   if (a.tid == null && b.tid != null) {
@@ -4786,11 +4818,8 @@ void _redRemove(String src, String dst) {
   for (var y = 0; y < im.height; y++) {
     for (var x = 0; x < im.width; x++) {
       final px = im.getPixel(x, y);
-      final r = px.r.toInt();
-      final g = px.g.toInt();
-      final b = px.b.toInt();
-      // لو البكسل مش أحمر (أخضر/أزرق قريبين من الأحمر) نخليه رمادي عادي، غير كده نستخدم الأحمر
-      final v = (r - g > 40 && r - b > 40) ? 255 : ((r + g + b) ~/ 3);
+      // نفس معادلة النسخة الأصلية (Kotlin ColorMatrix) اللي شغالة في العادي: القناة الحمرا لوحدها
+      final v = px.r.toInt();
       out.setPixelRgb(x, y, v, v, v);
     }
   }
@@ -4898,32 +4927,39 @@ Future<void> redRemoveAsync(String src, String dst) async {
   await Isolate.run(() => _redRemove(src, dst));
 }
 
-Future<int?> rectCountAsync(String src) =>
-    Isolate.run(() => _rectCountPage(src));
-
-bool _exifNormal(String path) {
+// التصغير لعرض 700 بيتعمل في Kotlin (نفس حساب Dart بالظبط، والناتج PNG من غير فقد) فـ Dart بيقرا صورة صغيرة بس.
+// لو الأصلية فشلت (أو الصورة متلفّة EXIF) بنرجع لطريقة Dart القديمة كاملة.
+Future<int?> rectCountAsync(String src) async {
+  final prep = '$src.r700.png';
   try {
-    final raf = File(path).openSync();
-    final len = math.min(raf.lengthSync(), 65536);
-    final head = raf.readSync(len);
-    raf.closeSync();
-    final ex = img.decodeJpgExif(head);
-    return (ex?.imageIfd.orientation ?? 1) == 1;
-  } catch (_) {
-    return false;
-  }
+    final ok = await _chan.invokeMethod<bool>('nativeRectPrep', {
+      'src': src,
+      'dst': prep,
+    });
+    if (ok == true && File(prep).existsSync()) {
+      final v = await Isolate.run(() => _rectCountPage(prep));
+      try {
+        File(prep).deleteSync();
+      } catch (_) {}
+      return v;
+    }
+  } catch (_) {}
+  try {
+    File(prep).deleteSync();
+  } catch (_) {}
+  return Isolate.run(() => _rectCountPage(src));
 }
 
+// النسخة الأصلية (Kotlin) بقت بتلفّ صور الكاميرا حسب الـ EXIF بنفسها، فبتشتغل على كل الصور.
+// Dart (أبطأ) بقى احتياطي بس لو الأصلية فشلت.
 Future<void> enhanceImageAsync(String src, String dst) async {
-  if (_exifNormal(src)) {
-    try {
-      final ok = await _chan.invokeMethod<bool>('nativeEnhance', {
-        'src': src,
-        'dst': dst,
-      });
-      if (ok == true) return;
-    } catch (_) {}
-  }
+  try {
+    final ok = await _chan.invokeMethod<bool>('nativeEnhance', {
+      'src': src,
+      'dst': dst,
+    });
+    if (ok == true) return;
+  } catch (_) {}
   await Isolate.run(() => _enhanceImage(src, dst));
 }
 
@@ -7907,6 +7943,14 @@ void checkUnusual(List<ReceiptItem> items, String reportDate) {
 
 // ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
 const int _kParWorkers = 2;
+// 3 قرّايين بدل 2 (اختياري - مقفول افتراضياً): أسرع على الموبايلات القوية بس بياخد ذاكرة أكتر
+bool par3Count = _loadBoolCfg('par3Count', false);
+void setPar3Count(bool v) {
+  par3Count = v;
+  _saveCfgKey('par3Count', v);
+}
+
+int get _parWorkers => par3Count ? 3 : _kParWorkers;
 
 // ───────── طرق العد (بتتحكم فيها من قايمة "طرق العد" في الشاشة) ─────────
 int _loadIntCfg(String k, int d, int lo, int hi) {
@@ -7977,6 +8021,7 @@ void resetCountDefaults() {
   setConsensusGuard(true);
   dualCount = false;
   _saveCfgKey('dualCount', false);
+  setPar3Count(false);
 }
 
 // ترقية لمرة واحدة (countFixV2): الافتراضيات الأدق بتتفعّل حتى لو كانت القيم القديمة محفوظة من نسخة أقدم.
@@ -8006,8 +8051,6 @@ bool dualCount = _loadDual();
 
 // ⚠️ لازم تتنده من دالة top-level: لو Isolate.run اتكتبت جوه ميثود في الـ State، الـ closure بتشيل معاها
 // الـ context كله (MResult + TextEditingController...) فالإرسال بيفشل والعد السريع بيقع على الطريقة البطيئة.
-Future<List<List<int>>> _pdfJpegRangesAsync(Uint8List b) =>
-    Isolate.run(() => _pdfJpegRanges(b));
 
 // بيطلّع صور الصفحات (JPEG) جاهزة من PDF ممسوح (CamScanner وغيره): من غير raster ولا PNG
 List<List<int>> _pdfJpegRanges(Uint8List b) {
@@ -8054,6 +8097,510 @@ List<List<int>> _pdfJpegRanges(Uint8List b) {
     pos = e + 9;
   }
   return out;
+}
+
+// ───────── خريطة صفحات الـ PDF: صورة JPEG لكل صفحة بترتيب الصفحات الحقيقي ─────────
+// بنقرا شجرة الصفحات (/Pages → /Kids) وموارد كل صفحة (/XObject) علشان نعرف صورة كل صفحة بالظبط.
+// لو الملف مضغوط بطريقة مش بنقراها (Object Streams) بنرجّع mapped=false وبيتستخدم الطريقة القديمة.
+
+class A2RPdfPageMap {
+  /// عدد الصفحات الحقيقي (0 = مش معروف)
+  final int pageCount;
+
+  /// لكل صفحة (بترتيب الصفحات): [بداية, نهاية] صورة الـ JPEG جوه الملف، أو null = الصفحة محتاجة تحويل (render)
+  final List<List<int>?> pages;
+
+  /// دوران كل صفحة (/Rotate)
+  final List<int> rotate;
+
+  /// true = الصفحات اتعرفت من شجرة الصفحات
+  final bool mapped;
+  A2RPdfPageMap(this.pageCount, this.pages, this.rotate, this.mapped);
+}
+
+class _PObj {
+  final String dict;
+  final int sStart, sEnd; // -1 لو مفيش stream
+  _PObj(this.dict, this.sStart, this.sEnd);
+}
+
+bool _pdWs(int c) => c == 32 || c == 10 || c == 13 || c == 9 || c == 12 || c == 0;
+bool _pdDigit(int c) => c >= 48 && c <= 57;
+
+int _pdFind(Uint8List b, List<int> p, int from, [int? limit]) {
+  final n = (limit ?? b.length) - p.length;
+  for (var i = from; i <= n; i++) {
+    if (b[i] != p[0]) continue;
+    var ok = true;
+    for (var j = 1; j < p.length; j++) {
+      if (b[i + j] != p[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return i;
+  }
+  return -1;
+}
+
+final List<int> _kObj = 'obj'.codeUnits;
+final List<int> _kEndstream = 'endstream'.codeUnits;
+final List<int> _kEndobj = 'endobj'.codeUnits;
+
+/// نهاية القاموس << ... >> اللي بيبدأ عند [i] (بيتعامل مع القواميس المتداخلة والنصوص بين أقواس)
+int _pdDictEnd(Uint8List b, int i) {
+  var depth = 0;
+  var k = i;
+  while (k < b.length - 1) {
+    final c = b[k];
+    if (c == 40) {
+      // ( نص )
+      var par = 1;
+      k++;
+      while (k < b.length && par > 0) {
+        if (b[k] == 92) {
+          k += 2;
+          continue;
+        }
+        if (b[k] == 40) par++;
+        if (b[k] == 41) par--;
+        k++;
+      }
+      continue;
+    }
+    if (c == 60 && b[k + 1] == 60) {
+      depth++;
+      k += 2;
+      continue;
+    }
+    if (c == 62 && b[k + 1] == 62) {
+      depth--;
+      k += 2;
+      if (depth == 0) return k;
+      continue;
+    }
+    k++;
+  }
+  return -1;
+}
+
+/// كل الكائنات (رقم → قاموس + مكان الـ stream). null لو الملف مش مفهوم
+Map<int, _PObj>? _pdObjects(Uint8List b) {
+  final objs = <int, _PObj>{};
+  var pos = 0;
+  while (true) {
+    final o = _pdFind(b, _kObj, pos);
+    if (o < 0) break;
+    pos = o + 3;
+    // لازم "N G obj" ومش "endobj"
+    if (o >= 3 &&
+        b[o - 1] == 100 &&
+        b[o - 2] == 110 &&
+        b[o - 3] == 101) {
+      continue; // endobj
+    }
+    if (o + 3 < b.length && !(_pdWs(b[o + 3]) || b[o + 3] == 60 || b[o + 3] == 91)) {
+      continue;
+    }
+    var k = o - 1;
+    if (k < 0 || !_pdWs(b[k])) continue;
+    while (k >= 0 && _pdWs(b[k])) {
+      k--;
+    }
+    if (k < 0 || !_pdDigit(b[k])) continue;
+    while (k >= 0 && _pdDigit(b[k])) {
+      k--;
+    }
+    if (k < 0 || !_pdWs(b[k])) continue;
+    while (k >= 0 && _pdWs(b[k])) {
+      k--;
+    }
+    if (k < 0 || !_pdDigit(b[k])) continue;
+    final numEnd = k + 1;
+    while (k >= 0 && _pdDigit(b[k])) {
+      k--;
+    }
+    if (k >= 0 && !(_pdWs(b[k]) || b[k] == 62 || b[k] == 41 || b[k] == 93)) {
+      continue;
+    }
+    final num = int.parse(String.fromCharCodes(b, k + 1, numEnd));
+    var d = o + 3;
+    while (d < b.length && _pdWs(b[d])) {
+      d++;
+    }
+    if (d + 1 >= b.length || b[d] != 60 || b[d + 1] != 60) {
+      // كائن مش قاموس (رقم/مصفوفة): نسجّله فاضي
+      final eo = _pdFind(b, _kEndobj, d);
+      objs[num] = _PObj('', -1, -1);
+      if (eo < 0) break;
+      pos = eo + 6;
+      continue;
+    }
+    final de = _pdDictEnd(b, d);
+    if (de < 0) return null;
+    final dict = String.fromCharCodes(b, d, de);
+    var s = de;
+    while (s < b.length && _pdWs(b[s])) {
+      s++;
+    }
+    var sStart = -1, sEnd = -1;
+    if (s + 6 <= b.length &&
+        b[s] == 115 &&
+        b[s + 1] == 116 &&
+        b[s + 2] == 114 &&
+        b[s + 3] == 101 &&
+        b[s + 4] == 97 &&
+        b[s + 5] == 109) {
+      var st = s + 6;
+      if (st < b.length && b[st] == 13) st++;
+      if (st < b.length && b[st] == 10) st++;
+      // بنتخطّى البيانات بالطول المكتوب لو صح (علشان بايتات جوه الصورة متتقراش كأنها كائن)
+      var e = -1;
+      final lm = RegExp(r'/Length\s+(\d+)(?!\d)(?!\s+\d+\s+R)').firstMatch(dict);
+      if (lm != null) {
+        final len = int.parse(lm.group(1)!);
+        var q = st + len;
+        if (q <= b.length) {
+          while (q < b.length && _pdWs(b[q])) {
+            q++;
+          }
+          if (_pdFind(b, _kEndstream, q, q + 9 <= b.length ? q + 9 : b.length) == q) {
+            e = q;
+          }
+        }
+      }
+      if (e < 0) e = _pdFind(b, _kEndstream, st);
+      if (e < 0) return null;
+      // نفس حدود الطريقة القديمة (_pdfJpegRanges): أول endstream بعد البداية، ونشيل المسافات
+      final eOld = _pdFind(b, _kEndstream, st);
+      var en = eOld;
+      while (en > st && (b[en - 1] == 10 || b[en - 1] == 13 || b[en - 1] == 32)) {
+        en--;
+      }
+      sStart = st;
+      sEnd = en;
+      pos = e + 9;
+    } else {
+      pos = s;
+    }
+    objs[num] = _PObj(dict, sStart, sEnd); // تحديث لاحق لنفس الرقم بيكسب
+  }
+  // كائنات جوه Object Streams (PDF 1.5+ مضغوط): القواميس بس (الصور دايماً برا)
+  final inner = <int, _PObj>{};
+  for (final o in objs.values) {
+    if (o.sStart < 0 || !_pdIsType(o.dict, 'ObjStm')) continue;
+    if (!o.dict.contains('/FlateDecode')) continue;
+    if (o.dict.contains('/DecodeParms')) continue;
+    final nM = RegExp(r'/N\s+(\d+)').firstMatch(o.dict);
+    final fM = RegExp(r'/First\s+(\d+)').firstMatch(o.dict);
+    if (nM == null || fM == null) continue;
+    List<int> raw;
+    try {
+      raw = zlib.decode(Uint8List.sublistView(b, o.sStart, o.sEnd));
+    } catch (_) {
+      continue;
+    }
+    final n = int.parse(nM.group(1)!);
+    final first = int.parse(fM.group(1)!);
+    if (first > raw.length) continue;
+    final head = String.fromCharCodes(raw, 0, first).trim().split(RegExp(r'\s+'));
+    if (head.length < n * 2) continue;
+    for (var k = 0; k < n; k++) {
+      final on = int.tryParse(head[2 * k]);
+      final off = int.tryParse(head[2 * k + 1]);
+      if (on == null || off == null) continue;
+      final st = first + off;
+      final en = k + 1 < n ? first + (int.tryParse(head[2 * k + 3]) ?? 0) : raw.length;
+      if (st < 0 || en > raw.length || en <= st) continue;
+      inner[on] = _PObj(String.fromCharCodes(raw, st, en).trim(), -1, -1);
+    }
+  }
+  inner.forEach((k, v) {
+    objs.putIfAbsent(k, () => v);
+  });
+  return objs;
+}
+
+final RegExp _pdRef = RegExp(r'(\d+)\s+(\d+)\s+R');
+
+/// قيمة مفتاح في قاموس: ref أو قاموس داخلي (نص) أو null
+String? _pdVal(String dict, String key) {
+  final m = RegExp('${RegExp.escape(key)}(?![A-Za-z])\\s*').firstMatch(dict);
+  if (m == null) return null;
+  final rest = dict.substring(m.end);
+  final r = RegExp(r'^(\d+)\s+(\d+)\s+R').firstMatch(rest);
+  if (r != null) return 'ref:${r.group(1)}';
+  if (rest.startsWith('<<')) {
+    final bb = Uint8List.fromList(rest.codeUnits.map((c) => c & 0xFF).toList());
+    final e = _pdDictEnd(bb, 0);
+    if (e < 0) return null;
+    return rest.substring(0, e);
+  }
+  final t = RegExp(r'^[^/>\]\s][^/>\]]*').firstMatch(rest);
+  return t?.group(0)?.trim();
+}
+
+String? _pdResolveDict(Map<int, _PObj> objs, String? v) {
+  if (v == null) return null;
+  if (v.startsWith('ref:')) return objs[int.parse(v.substring(4))]?.dict;
+  return v;
+}
+
+bool _pdIsType(String dict, String t) =>
+    RegExp('/Type\\s*/$t(?![A-Za-z])').hasMatch(dict);
+
+bool _pdJpegOk(Uint8List b, int st, int en) =>
+    st >= 0 &&
+    en - st > 4 &&
+    b[st] == 0xFF &&
+    b[st + 1] == 0xD8 &&
+    b[en - 2] == 0xFF &&
+    b[en - 1] == 0xD9;
+
+/// خريطة صفحات الملف. بترجع mapped=false لو مقدرناش نقرا الشجرة
+A2RPdfPageMap a2rPdfPageMap(Uint8List b) {
+  Map<int, _PObj>? objs;
+  try {
+    objs = _pdObjects(b);
+  } catch (_) {
+    objs = null;
+  }
+  if (objs == null || objs.isEmpty) return A2RPdfPageMap(0, const [], const [], false);
+  // جذر الصفحات: من /Catalog (آخر تعريف) ولو مش موجود: /Pages من غير /Parent
+  int? root;
+  for (final e in objs.entries) {
+    if (_pdIsType(e.value.dict, 'Catalog')) {
+      final v = _pdVal(e.value.dict, '/Pages');
+      if (v != null && v.startsWith('ref:')) root = int.parse(v.substring(4));
+    }
+  }
+  if (root == null) {
+    final cands = objs.entries
+        .where((e) => _pdIsType(e.value.dict, 'Pages') && !e.value.dict.contains('/Parent'))
+        .map((e) => e.key)
+        .toList();
+    if (cands.length == 1) root = cands.first;
+  }
+  // عدد الصفحات المكتوب في الجذر (حتى لو الشجرة نفسها مش مقروءة)
+  var declared = 0;
+  if (root != null && objs[root] != null) {
+    final c = RegExp(r'/Count\s+(\d+)').firstMatch(objs[root]!.dict);
+    if (c != null) declared = int.parse(c.group(1)!);
+  }
+  if (root == null || objs[root] == null) {
+    // مفيش شجرة مقروءة: نعدّ كائنات /Type /Page بس
+    final n = objs.values.where((o) => _pdIsType(o.dict, 'Page')).length;
+    return A2RPdfPageMap(n, const [], const [], false);
+  }
+  final pageObjs = <int>[];
+  final pageRes = <String?>[];
+  final pageRot = <int>[];
+  final visited = <int>{};
+  bool walk(int n, String? inhRes, int inhRot, int depth) {
+    if (depth > 30 || !visited.add(n)) return false;
+    final o = objs![n];
+    if (o == null) return false;
+    final d = o.dict;
+    final resV = _pdVal(d, '/Resources');
+    final res = resV != null ? _pdResolveDict(objs, resV) : inhRes;
+    final rv = _pdVal(d, '/Rotate');
+    final rot = rv != null ? (int.tryParse(rv.split(RegExp(r'\s')).first) ?? inhRot) : inhRot;
+    if (_pdIsType(d, 'Pages')) {
+      final km = RegExp(r'/Kids\s*\[([^\]]*)\]').firstMatch(d);
+      if (km == null) return false;
+      for (final r in _pdRef.allMatches(km.group(1)!)) {
+        if (!walk(int.parse(r.group(1)!), res, rot, depth + 1)) return false;
+      }
+      return true;
+    }
+    if (_pdIsType(d, 'Page')) {
+      pageObjs.add(n);
+      pageRes.add(res);
+      pageRot.add(rot);
+      return true;
+    }
+    return false;
+  }
+
+  var ok = false;
+  try {
+    ok = walk(root, null, 0, 0);
+  } catch (_) {
+    ok = false;
+  }
+  if (!ok || pageObjs.isEmpty || (declared > 0 && declared != pageObjs.length)) {
+    return A2RPdfPageMap(declared > 0 ? declared : pageObjs.length, const [], const [], false);
+  }
+  final pages = <List<int>?>[];
+  for (var i = 0; i < pageObjs.length; i++) {
+    List<int>? pick;
+    final res = pageRes[i];
+    final xv = res != null ? _pdVal(res, '/XObject') : null;
+    final xd = _pdResolveDict(objs, xv);
+    if (xd != null) {
+      var forms = 0;
+      final imgs = <List<int>>[]; // [start, end, isJpeg]
+      for (final r in _pdRef.allMatches(xd)) {
+        final o = objs[int.parse(r.group(1)!)];
+        if (o == null) continue;
+        if (o.dict.contains('/Subtype') &&
+            RegExp(r'/Subtype\s*/Form').hasMatch(o.dict)) {
+          forms++;
+          continue;
+        }
+        if (!RegExp(r'/Subtype\s*/Image').hasMatch(o.dict)) continue;
+        final jpg = o.dict.contains('/DCTDecode') && _pdJpegOk(b, o.sStart, o.sEnd);
+        imgs.add([o.sStart, o.sEnd, jpg ? 1 : 0]);
+      }
+      if (forms == 0 && imgs.isNotEmpty) {
+        imgs.sort((a, b2) => (b2[1] - b2[0]).compareTo(a[1] - a[0]));
+        final big = imgs.first;
+        final bigLen = big[1] - big[0];
+        // صورة الصفحة = أكبر صورة، والباقي لازم يكون صغير جداً (شعار/علامة مائية) علشان نعتمدها
+        final othersSmall = imgs.skip(1).every((x) => (x[1] - x[0]) * 10 < bigLen);
+        if (big[2] == 1 && othersSmall) pick = [big[0], big[1]];
+      }
+    }
+    pages.add(pick);
+  }
+  return A2RPdfPageMap(pages.length, pages, pageRot, true);
+}
+
+/// خطة قراءة صفحات الملف للعدّ السريع والتعريف.
+/// pages[i] = حدود صورة JPEG للصفحة i، أو null = الصفحة تتقرا بالتحويل (render) لأنها مش صورة JPEG واضحة أو متلفّة.
+class A2RPdfPagePlan {
+  final List<List<int>?> pages;
+  final String? note; // ملاحظة للمستخدم (عدد الصفحات مختلف ...)
+  final bool review; // الملف محتاج مراجعة (مقدرناش نتأكد من الصفحات)
+  final int realPages; // 0 = مش معروف
+  A2RPdfPagePlan(this.pages, this.note, this.review, this.realPages);
+}
+
+A2RPdfPagePlan a2rPdfPagePlan(Uint8List b, List<List<int>> ranges) {
+  A2RPdfPageMap m;
+  try {
+    m = a2rPdfPageMap(b);
+  } catch (_) {
+    m = A2RPdfPageMap(0, const [], const [], false);
+  }
+  bool sameAsRanges(List<List<int>?> p) {
+    if (p.length != ranges.length) return false;
+    for (var i = 0; i < p.length; i++) {
+      final x = p[i];
+      if (x == null || x[0] != ranges[i][0] || x[1] != ranges[i][1]) return false;
+    }
+    return true;
+  }
+
+  // مفيش ولا صورة صفحة كبيرة (PDF رقمي أو كل الصور صغيرة): نفس الطريقة القديمة بالظبط
+  if (ranges.isEmpty && !m.mapped) return A2RPdfPagePlan(const [], null, false, m.pageCount);
+  if (m.mapped) {
+    // صفحة متلفّة (/Rotate) أو صورتها صغيرة (≤ 20KB زي الطريقة القديمة): بتتحوّل لوحدها بدل ما تتقرا من الصورة
+    final pages = <List<int>?>[
+      for (var i = 0; i < m.pages.length; i++)
+        (m.rotate[i] % 360 != 0 ||
+                m.pages[i] == null ||
+                m.pages[i]![1] - m.pages[i]![0] <= 20000)
+            ? null
+            : m.pages[i],
+    ];
+    // A parsed page tree is authoritative. Never replace null/rotated
+    // pages with raw JPEG order, even when image and page counts match.
+    final jpegPages = pages.where((p) => p != null).length;
+    if (jpegPages == pages.length) {
+      if (sameAsRanges(pages)) return A2RPdfPagePlan(pages, null, false, m.pageCount);
+      final diffN = ranges.length != pages.length;
+      return A2RPdfPagePlan(
+        pages,
+        diffN
+            ? 'عدد الصفحات مختلف — راجع الملف: الملف ${pages.length} صفحة وصور الصفحات ${ranges.length} (اتقرت كل صفحة من صورتها حسب ترتيب الملف)'
+            : 'ترتيب صور الصفحات جوه الملف مختلف عن ترتيب الصفحات — اتقرت بترتيب الصفحات الصح',
+        diffN,
+        m.pageCount,
+      );
+    }
+    final rend = <int>[
+      for (var i = 0; i < pages.length; i++)
+        if (pages[i] == null) i + 1,
+    ];
+    final diffN = ranges.length != pages.length;
+    return A2RPdfPagePlan(
+      pages,
+      '${diffN ? 'عدد الصفحات مختلف — راجع الملف: الملف ${pages.length} صفحة وصور الصفحات ${ranges.length} • ' : ''}'
+      'الصفحات ${rend.join('، ')} اتقرت بالتحويل (صورتها مش JPEG عادية أو صغيرة أو الصفحة متلفّة)',
+      diffN,
+      m.pageCount,
+    );
+  }
+  // الشجرة مش مقروءة: الطريقة القديمة، ولو عدد الصفحات معروف ومختلف نعلّم الملف للمراجعة
+  final pl = ranges.map((r) => <int>[r[0], r[1]]).toList();
+  if (m.pageCount > 0 && m.pageCount != ranges.length && ranges.isNotEmpty) {
+    return A2RPdfPagePlan(
+      pl,
+      'عدد الصفحات مختلف — راجع الملف: الملف ${m.pageCount} صفحة واتقرا منه ${ranges.length} صورة',
+      true,
+      m.pageCount,
+    );
+  }
+  return A2RPdfPagePlan(pl, null, false, m.pageCount);
+}
+
+// خطة صفحات الملف (في isolate علشان الواجهة ما تهنجش)
+Future<A2RPdfPagePlan> _pdfPagePlanAsync(Uint8List b) =>
+    Isolate.run(() => a2rPdfPagePlan(b, _pdfJpegRanges(b)));
+
+// ───────── قراءات الصفحات المحفوظة من مرحلة التعريف: علشان نفس الصورة ما تتقراش مرتين ─────────
+// المفتاح = مكان الصورة + طولها + بصمة (FNV) لكل البايتات، فبيتستخدم بس لو الصورة نفسها بالظبط.
+final Map<String, RecognizedText> _ocrCache = <String, RecognizedText>{};
+const int _kOcrCacheMax = 60; // حد أقصى علشان الذاكرة (صفحات التعريف بس: غالباً 1-3 صفحات لكل ملف)
+
+String _jpegKey(Uint8List b, List<int> rg) {
+  var h = 0x811c9dc5;
+  for (var i = rg[0]; i < rg[1]; i++) {
+    h = ((h ^ b[i]) * 0x01000193) & 0xFFFFFFFF;
+  }
+  return '${rg[0]}:${rg[1]}:${h.toRadixString(16)}';
+}
+
+void _ocrCachePut(String k, RecognizedText t) {
+  if (_ocrCache.length < _kOcrCacheMax) _ocrCache[k] = t;
+}
+
+/// قراءة صورة JPEG لصفحة (من الذاكرة لو اتقرت قبل كده بنفس البايتات)
+Future<RecognizedText> _ocrJpegPage(
+  TextRecognizer rec,
+  Uint8List bytes,
+  List<int> rg,
+  String name, {
+  bool keep = false,
+}) async {
+  final k = _jpegKey(bytes, rg);
+  final c = keep ? _ocrCache[k] : _ocrCache.remove(k);
+  if (c != null) return c;
+  _ensureMTmp();
+  final path = '$mTmpDir/$name.jpg';
+  await File(path).writeAsBytes(Uint8List.sublistView(bytes, rg[0], rg[1]));
+  try {
+    final res = await _ocr(rec, path);
+    if (keep) _ocrCachePut(k, res);
+    return res;
+  } finally {
+    try {
+      File(path).deleteSync();
+    } catch (_) {}
+  }
+}
+
+/// تحويل صفحة واحدة لصورة PNG (نفس طريقة التحويل القديمة) - للصفحات اللي مش صورة JPEG
+Future<String> _renderPagePng(Uint8List bytes, int pi, String path, int dpiWant) async {
+  final dpi = await _safeDpi(bytes, pi, dpiWant.toDouble());
+  await for (final page in Printing.raster(bytes, pages: [pi], dpi: dpi)) {
+    final png = await page.toPng();
+    _ensureMTmp();
+    await File(path).writeAsBytes(png);
+    return path;
+  }
+  throw Exception('render failed p${pi + 1}');
 }
 
 class _SA {
@@ -10117,30 +10664,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final res = await rec.processImage(InputImage.fromFilePath(item.path));
       final a = analyzeLines(toLines(res));
       double? alt;
-      var hasBatchClosed = RegExp(
-        r'BATCH\s*CLOS',
-        caseSensitive: false,
-      ).hasMatch(res.text.toUpperCase());
+      var hasBatchClosed = _hasBatchClosedText(res.text);
       var hasReprint = RegExp(
         r'REPRINT|SUMMARY|DUPLICATE',
         caseSensitive: false,
       ).hasMatch(res.text.toUpperCase());
-      if (!a.ok ||
-          a.tid == null ||
-          a.row == null ||
-          a.val <= 0 ||
-          !hasBatchClosed ||
-          hasReprint) {
+      if (_needSecondRead(a, res.text, hasReprint)) {
         try {
           final ep = '$tmpDir/rescan_enh.jpg';
           await enhanceImageAsync(item.path, ep);
           final res2 = await rec.processImage(InputImage.fromFilePath(ep));
           final a2 = analyzeLines(toLines(res2));
-          if (RegExp(
-            r'BATCH\s*CLOS',
-            caseSensitive: false,
-          ).hasMatch(res2.text.toUpperCase()))
-            hasBatchClosed = true;
+          if (_hasBatchClosedText(res2.text)) hasBatchClosed = true;
           if (RegExp(
             r'REPRINT|SUMMARY|DUPLICATE',
             caseSensitive: false,
@@ -11537,22 +12072,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             final key = '${baseName(f.path)}:${f.lengthSync()}';
             final a = analyzeLines(toLines(res));
             double? alt;
-            bool hasBatchClosed = RegExp(
-              r'BATCH\s*CLOS',
-              caseSensitive: false,
-            ).hasMatch(res.text.toUpperCase());
+            bool hasBatchClosed = _hasBatchClosedText(res.text);
             bool hasReprint = RegExp(
               r'REPRINT|SUMMARY|DUPLICATE',
               caseSensitive: false,
             ).hasMatch(res.text.toUpperCase());
 
-            final needSecond =
-                !a.ok ||
-                a.tid == null ||
-                a.row == null ||
-                a.val <= 0 ||
-                !hasBatchClosed ||
-                hasReprint;
+            final needSecond = _needSecondRead(a, res.text, hasReprint);
             if (needSecond && !stopReq) {
               try {
                 final ep = '$tmpDir/w${wid}_enh.jpg';
@@ -11561,11 +12087,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   InputImage.fromFilePath(ep),
                 );
                 final a2 = analyzeLines(toLines(res2));
-                if (RegExp(
-                  r'BATCH\s*CLOS',
-                  caseSensitive: false,
-                ).hasMatch(res2.text.toUpperCase()))
-                  hasBatchClosed = true;
+                if (_hasBatchClosedText(res2.text)) hasBatchClosed = true;
                 if (RegExp(
                   r'REPRINT|SUMMARY|DUPLICATE',
                   caseSensitive: false,
@@ -19329,6 +19851,7 @@ class _MachinesPageState extends State<MachinesPage>
     } finally {
       await closeRec();
       _curLabel = '';
+      _ocrCache.clear();
       try {
         Directory(mTmpDir).deleteSync(recursive: true);
       } catch (_) {}
@@ -19502,12 +20025,63 @@ class _MachinesPageState extends State<MachinesPage>
   }
 
   // قراءة صفحات الـ PDF (لحد 6) وتصويت على Terminal ID، وبعدين مطابقتها باسم الملف الأصلي
-  Future<void> _identifyOne(MResult r, File f, TextRecognizer rec) async {
-    final bytes = await f.readAsBytes();
+  // ⚡ تعريف سريع من صور الصفحات (JPEG) جوه الـ PDF مباشرة: نفس الصور اللي العد السريع بيقراها، من غير تحويل.
+  // بيتقبل بس لو النتيجة قوية بنفس شرط الوقوف البدري بتاع الطريقة القديمة (Terminal ID واضح + يوم معقول)،
+  // غير كده بنرجع للطريقة القديمة (تحويل الصفحات) من الأول. القراءات بتتحفظ علشان العد ما يعيدهاش.
+  Future<(StringBuffer, Map<String, double>, MIdent)?> _identifyFromJpeg(
+    MResult r,
+    Uint8List bytes,
+    TextRecognizer rec,
+  ) async {
+    final A2RPdfPagePlan plan;
+    try {
+      plan = await _pdfPagePlanAsync(bytes);
+    } catch (_) {
+      return null;
+    }
+    if (plan.pages.isEmpty) return null;
     final sb = StringBuffer();
     final votes = <String, double>{};
     var id = MIdent();
-    for (var pi = 0; pi < 25; pi++) {
+    for (var pi = 0; pi < plan.pages.length && pi < 25; pi++) {
+      if (stopReq) throw const ScanStopped();
+      if (pi >= 6 && votes.isNotEmpty) break;
+      final rg = plan.pages[pi];
+      if (rg == null) continue;
+      try {
+        final res = await _ocrJpegPage(rec, bytes, rg, 'idj_$pi', keep: true);
+        sb.writeln(res.text);
+        _tidVotes(res.text).forEach((k, v) => votes[k] = (votes[k] ?? 0) + v);
+      } catch (_) {
+        continue;
+      }
+      id = _identify(sb.toString());
+      final rk = _rankVotes(votes);
+      if (id.day != null &&
+          _plausibleDay(id.day, id.month) &&
+          rk.isNotEmpty &&
+          rk.first.value >= 3 &&
+          (rk.length < 2 || rk.first.value >= rk[1].value * 2)) {
+        _dbg('ID_JPEG ${r.pdfName}: ${pi + 1} صفحة');
+        return (sb, votes, id);
+      }
+    }
+    _dbg('ID_JPEG ${r.pdfName}: مش واضح، هنحوّل الصفحات (الطريقة القديمة)');
+    return null;
+  }
+
+  Future<void> _identifyOne(MResult r, File f, TextRecognizer rec) async {
+    final bytes = await f.readAsBytes();
+    var sb = StringBuffer();
+    var votes = <String, double>{};
+    var id = MIdent();
+    final fast = await _identifyFromJpeg(r, bytes, rec);
+    if (fast != null) {
+      sb = fast.$1;
+      votes = fast.$2;
+      id = fast.$3;
+    }
+    for (var pi = 0; fast == null && pi < 25; pi++) {
       if (stopReq) throw const ScanStopped();
       // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
       if (pi >= 6 && votes.isNotEmpty) break;
@@ -19813,8 +20387,63 @@ class _MachinesPageState extends State<MachinesPage>
     File src,
   ) async {
     // البحث في الـ bytes بيشتغل في isolate علشان الواجهة ما تهنجش مع الملفات الكبيرة
-    final ranges = await _pdfJpegRangesAsync(bytes);
+    // خريطة الصفحات: صورة JPEG لكل صفحة بترتيب صفحات الملف (null = الصفحة دي بتتحوّل لوحدها)
+    final plan = await _pdfPagePlanAsync(bytes);
+    final ranges = plan.pages;
     if (ranges.isEmpty) return false;
+    if (plan.note != null) {
+      _dbg('PAGEMAP ${r.pdfName}: ${plan.note}');
+      if (plan.review) r.cntOk = false;
+      r.cntNotes.add(plan.note!);
+    }
+    final rendered = <int>{
+      for (var i = 0; i < ranges.length; i++)
+        if (ranges[i] == null) i,
+    };
+    // ملف الصفحة: صورة الـ JPEG نفسها، أو تحويل الصفحة دي بس لو مش صورة JPEG
+    Future<String> pageFile(int i, String name) async {
+      _ensureMTmp();
+      final rg = ranges[i];
+      if (rg != null) {
+        final p = '$mTmpDir/$name.jpg';
+        await File(p).writeAsBytes(Uint8List.sublistView(bytes, rg[0], rg[1]));
+        return p;
+      }
+      return _renderPagePng(bytes, i, '$mTmpDir/$name.png', 220);
+    }
+
+    var cacheHits = 0, retried = 0;
+    // قراءة صفحة: من الذاكرة لو مرحلة التعريف قرت نفس الصورة بالظبط، غير كده OCR عادي.
+    // لو قراءة صورة الـ JPEG فشلت (خطأ/وقت)، بنجرب الصفحة دي بس بالتحويل مرة واحدة.
+    Future<RecognizedText> readPage(TextRecognizer rr, int i) async {
+      final rg = ranges[i];
+      if (rg != null) {
+        final k = _jpegKey(bytes, rg);
+        final c = _ocrCache.remove(k);
+        if (c != null) {
+          cacheHits++;
+          return c;
+        }
+        try {
+          return await _ocrJpegPage(rr, bytes, rg, 'f_$i');
+        } catch (e) {
+          if (stopReq) rethrow;
+          _dbg(
+            'FAST_PAGE_RETRY ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}',
+          );
+          retried++;
+        }
+      }
+      final p = await _renderPagePng(bytes, i, '$mTmpDir/f_$i.png', 220);
+      try {
+        return await _ocr(rr, p);
+      } finally {
+        try {
+          File(p).deleteSync();
+        } catch (_) {}
+      }
+    }
+
     final col = MCollector()..trackDups = true;
     final sw = Stopwatch()..start();
     var total = 0, totalMx = 0, failed = 0, slips = 0, total3 = 0;
@@ -19829,106 +20458,14 @@ class _MachinesPageState extends State<MachinesPage>
     final pageAmt = <int, List<double>>{}; // رقم الصفحة -> المبالغ المقروءة
     final pageAmtN = <int, int>{}; // رقم الصفحة -> عدد علامات AMOUNT
     final par = parallelCount;
-    // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
-    if (par) {
-      final extra = <TextRecognizer>[
-        for (var k = 1; k < _kParWorkers; k++)
-          TextRecognizer(script: TextRecognitionScript.latin),
-      ];
-      final recs = <TextRecognizer>[rec, ...extra];
+    // معالجة نتيجة صفحة (بترتيب الصفحات دايماً - نفس المنطق للمتوازي والعادي)
+    void process(int i, Object out) {
       try {
-        for (var i0 = 0; i0 < ranges.length; i0 += recs.length) {
-          if (stopReq) throw const ScanStopped();
-          final idxs = <int>[
-            for (var k = i0; k < i0 + recs.length && k < ranges.length; k++) k,
-          ];
-          _ensureMTmp();
-          _tick(i0 + 1, ranges.length);
-          final outs = await Future.wait(<Future<Object>>[
-            for (var j = 0; j < idxs.length; j++)
-              (() async {
-                final i = idxs[j];
-                try {
-                  final path = '$mTmpDir/f_$i.jpg';
-                  await File(path).writeAsBytes(
-                    Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]),
-                  );
-                  return await _ocr(recs[j], path);
-                } catch (e) {
-                  return e;
-                }
-              })(),
-          ]);
-          for (var j = 0; j < idxs.length; j++) {
-            final i = idxs[j];
-            final out = outs[j];
-            try {
-              if (out is! RecognizedText) throw out;
-              final res = out;
-              if (_isIdSlip(res)) {
-                slips++;
-              } else {
-                final sp = _structCount(res);
-                _dbg(
-                  'PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} m3=${sp.sm3} ${sp.types} AMT=${sp.dbgAmt}',
-                );
-                total += sp.sm;
-                total2 += sp.sm2;
-                total3 += sp.sm3;
-                totalMx += sp.mx;
-                if (sp.sm == 0) empty.add(i + 1);
-                if ((sp.sm - sp.mx).abs() >= 2)
-                  diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
-                col.pageH = sp.h;
-                col.pages.add(<Anchor>[]);
-                col.curPage = i + 1;
-                _collect(res, 0, 1, col);
-                pageSm[i + 1] = sp.sm;
-                pageSm2[i + 1] = sp.sm2;
-                pageSm3[i + 1] = sp.sm3;
-                pageVote[i + 1] = sp.voteN >= 3 ? sp.vote : 0;
-                pageAmt[i + 1] = sp.amts;
-                pageAmtN[i + 1] = sp.types['amount'] ?? 0;
-              }
-            } catch (e) {
-              failed++;
-              if (failed <= 3)
-                _dbg(
-                  'FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}',
-                );
-            }
-            try {
-              File('$mTmpDir/f_$i.jpg').deleteSync();
-            } catch (_) {}
-          }
-          await Future.delayed(const Duration(milliseconds: 2));
-        }
-      } finally {
-        for (final e in extra) {
-          try {
-            await e.close();
-          } catch (_) {}
-        }
-      }
-    }
-    if (!par)
-      for (var i = 0; i < ranges.length; i++) {
-        if (stopReq) throw const ScanStopped();
-        final fp = File('$mTmpDir/f_$i.jpg');
-        try {
-          _ensureMTmp();
-          await fp.writeAsBytes(
-            Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]),
-          );
-          _tick(i + 1, ranges.length);
-          final res = await _ocr(rec, fp.path);
-          if (_isIdSlip(res)) {
-            slips++;
-            try {
-              fp.deleteSync();
-            } catch (_) {}
-            continue;
-          }
+        if (out is! RecognizedText) throw out;
+        final res = out;
+        if (_isIdSlip(res)) {
+          slips++;
+        } else {
           final sp = _structCount(res);
           _dbg(
             'PAGE ${i + 1}: m1=${sp.sm} m2=${sp.sm2} m3=${sp.sm3} ${sp.types} AMT=${sp.dbgAmt}',
@@ -19950,23 +20487,104 @@ class _MachinesPageState extends State<MachinesPage>
           pageVote[i + 1] = sp.voteN >= 3 ? sp.vote : 0;
           pageAmt[i + 1] = sp.amts;
           pageAmtN[i + 1] = sp.types['amount'] ?? 0;
-        } catch (e) {
-          failed++;
-          if (failed <= 3)
-            _dbg(
-              'FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}',
-            );
         }
+      } catch (e) {
+        failed++;
+        if (failed <= 3)
+          _dbg(
+            'FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}',
+          );
+      }
+    }
+
+    // ⚡ المتوازي: طابور مشترك - كل قارئ بياخد الصفحة اللي عليها الدور أول ما يفضى (بدل ما يستنوا بعض كل صفحتين)،
+    // والنتايج بتتعالج بترتيب الصفحات بالظبط زي العد العادي
+    if (par) {
+      final extra = <TextRecognizer>[
+        for (var k = 1; k < _parWorkers; k++)
+          TextRecognizer(script: TextRecognitionScript.latin),
+      ];
+      final recs = <TextRecognizer>[rec, ...extra];
+      final outs = List<Object?>.filled(ranges.length, null);
+      var next = 0, done = 0, proc = 0;
+      void drain() {
+        while (proc < ranges.length && outs[proc] != null) {
+          process(proc, outs[proc]!);
+          outs[proc] = true; // نفضّي الذاكرة
+          proc++;
+        }
+      }
+
+      Future<void> worker(TextRecognizer rr) async {
+        while (!stopReq) {
+          final i = next++;
+          if (i >= ranges.length) return;
+          Object out;
+          try {
+            out = await readPage(rr, i);
+          } catch (e) {
+            out = e;
+          }
+          outs[i] = out;
+          done++;
+          _tick(done, ranges.length);
+          drain();
+          await Future.delayed(const Duration(milliseconds: 2));
+        }
+      }
+
+      try {
+        _ensureMTmp();
+        _tick(1, ranges.length);
+        await Future.wait(<Future<void>>[for (final rr in recs) worker(rr)]);
+        if (stopReq) throw const ScanStopped();
+        drain();
+      } finally {
+        for (final e in extra) {
+          try {
+            await e.close();
+          } catch (_) {}
+        }
+      }
+    }
+    if (!par)
+      for (var i = 0; i < ranges.length; i++) {
+        if (stopReq) throw const ScanStopped();
+        _tick(i + 1, ranges.length);
+        Object out;
         try {
-          fp.deleteSync();
-        } catch (_) {}
+          out = await readPage(rec, i);
+        } catch (e) {
+          out = e;
+        }
+        process(i, out);
         await Future.delayed(const Duration(milliseconds: 2));
       }
     _dbg(
-      'FAST${par ? '-PAR' : ''} ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed',
+      'FAST${par ? '-PAR$_parWorkers' : ''} ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed'
+      '${cacheHits > 0 ? '، من قراءة التعريف $cacheHits' : ''}${rendered.isNotEmpty ? '، اتحولت ${rendered.length}' : ''}${retried > 0 ? '، اتعادت بالتحويل $retried' : ''}',
     );
-    if (total == 0 || failed == ranges.length)
-      return false; // نرجع للطريقة القديمة
+    if (total == 0 || failed == ranges.length) {
+      // مفيش إيصالات اتقرت: الملف بيتعلّم للمراجعة بدل ما يتعد كله تاني بالطريقة البطيئة (اللي نتيجتها مش مضمونة).
+      // الصفحات اللي فشلت اتجربت خلاص بالتحويل صفحة صفحة. لو الملف فيه إيصالات: ⋮ ← "عدّ بالطريقة البطيئة"
+      r.count = 0;
+      r.cntOk = false;
+      r.pageCounts = {};
+      r.pageWarn = {};
+      r.pageNote = {};
+      r.amtSum = 0;
+      r.amtRead = 0;
+      r.cntNotes.add(
+        '0 إيصالات — للمراجعة'
+        '${failed > 0 ? ' • $failed صفحة فشلت قراءتها' : ''}'
+        ' • لو الملف فيه إيصالات: من ⋮ اختار "عدّ بالطريقة البطيئة"',
+      );
+      r.detail =
+          'عدّ سريع${par ? ' متوازي' : ''} • ${ranges.length} صفحة • 0 إيصالات — للمراجعة'
+          '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}'
+          ' • ⏱ ${fmtElapsed(Duration(seconds: (sw.elapsedMilliseconds / 1000).round()))}';
+      return true;
+    }
     // ───── صفحات مشكوك فيها: قراءة تانية بعد إزالة الخط الأحمر + عدّ المستطيلات بالشكل ─────
     // بنعيد بس الصفحات اللي طرق العد اختلفت فيها أو عددها مش زي باقي الصفحات (غير آخر صفحة).
     // البديل بيتقبل بس لو القراءة المنضّفة متفقة مع نفسها (الطرق التلاتة نفس الرقم) وعددها مش أقل من الأصلي
@@ -19996,12 +20614,10 @@ class _MachinesPageState extends State<MachinesPage>
       if (stopReq) throw const ScanStopped();
       try {
         _ensureMTmp();
-        final p1 = '$mTmpDir/rr_${k - 1}.jpg';
+        final p1 = await pageFile(k - 1, 'rr_${k - 1}');
         final p2 = '$mTmpDir/rr_${k - 1}_c.jpg';
-        await File(p1).writeAsBytes(
-          Uint8List.sublistView(bytes, ranges[k - 1][0], ranges[k - 1][1]),
-        );
-        final rect = await rectCountAsync(p1);
+        // عدّ المستطيلات بيتعمل بس على صورة الـ JPEG (الصفحة المحوّلة خلفيتها شفافة فمش مناسبة له)
+        final rect = rendered.contains(k - 1) ? null : await rectCountAsync(p1);
         await redRemoveAsync(p1, p2);
         final res3 = await _ocr(rec, p2);
         final cs = _structCount(res3);
@@ -20112,11 +20728,8 @@ class _MachinesPageState extends State<MachinesPage>
         try {
           final i = lastK - 1;
           _ensureMTmp();
-          final p1 = '$mTmpDir/last_$i.jpg';
+          final p1 = await pageFile(i, 'last_$i');
           final p2 = '$mTmpDir/last_${i}_e.jpg';
-          await File(p1).writeAsBytes(
-            Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]),
-          );
           await enhanceImageAsync(p1, p2);
           final res2 = await _ocr(rec, p2);
           final sp2 = _structCount(res2);
@@ -20302,7 +20915,10 @@ class _MachinesPageState extends State<MachinesPage>
       return;
     }
     final bytes = await src.readAsBytes();
-    if (fastCount) {
+    // "عدّ بالطريقة البطيئة" من ⋮ : المرة دي بس الملف ده يتعد بالتحويل + الشرائح (الطريقة القديمة الكاملة)
+    final forceSlow = _forceSlow.remove(r.key);
+    if (forceSlow) _dbg('FORCE_SLOW ${r.pdfName}');
+    if (fastCount && !forceSlow) {
       try {
         if (await _countOneFast(r, rec, bytes, src)) return;
       } on ScanStopped {
@@ -20425,7 +21041,15 @@ class _MachinesPageState extends State<MachinesPage>
     }
   }
 
-  Future<void> recount(MResult r) async {
+  // ملفات المستخدم طلب لها العد بالطريقة البطيئة (مرة واحدة)
+  final Set<String> _forceSlow = <String>{};
+
+  Future<void> recount(MResult r, {bool slow = false}) async {
+    if (slow) {
+      _forceSlow.add(r.key);
+    } else {
+      _forceSlow.remove(r.key);
+    }
     r.count = -1;
     r.tries = 0;
     saveMState(results);
@@ -20826,6 +21450,8 @@ class _MachinesPageState extends State<MachinesPage>
                                             shareOne(r);
                                           } else if (v == 'recount') {
                                             recount(r);
+                                          } else if (v == 'recountSlow') {
+                                            recount(r, slow: true);
                                           } else if (v == 'assign') {
                                             assignMachine(r);
                                           } else if (v == 'clear') {
@@ -20869,6 +21495,13 @@ class _MachinesPageState extends State<MachinesPage>
                                             value: 'recount',
                                             enabled: !busy,
                                             child: const Text('إعادة العد'),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'recountSlow',
+                                            enabled: !busy,
+                                            child: const Text(
+                                              'عدّ بالطريقة البطيئة',
+                                            ),
                                           ),
                                           if (r.verdict != 0)
                                             const PopupMenuItem(
