@@ -1604,6 +1604,8 @@ class SysTotal {
   // مش بيتحفظوا: بيتحسبوا من جديد كل مرة من مقارنة المبلغ بالباتشات
   String? review; // سبب "راجع الماكينة" (ترمنل قريب من ماكينة تانية والمبلغ مش مطابق)
   String? tidFixFrom; // الترمنل اللي اتقرا قبل ما يتصحح بالمبلغ (زي 0 اتقرت 1 في آخر رقم)
+  String? unitCode; // v96: كود الوحدة بالإنجليزي من الإيصال الجديد (ABIS-1 ...). القديم مفيهوش
+  bool tidByAmt = false; // الترمنل مش مقروء واتحدد بالمبلغ (بيتحسب من جديد كل مرة)
 
   SysTotal(
     this.tid,
@@ -1616,6 +1618,7 @@ class SysTotal {
     this.path = '',
     List<double>? cands,
     this.manual = false,
+    this.unitCode,
   }) : cands = cands ?? <double>[];
 
   Map<String, dynamic> toJson() => {
@@ -1629,6 +1632,7 @@ class SysTotal {
     'p': path,
     'cands': cands,
     'man': manual,
+    if (unitCode != null) 'uc': unitCode,
   };
 
   static SysTotal fromJson(Map m) => SysTotal(
@@ -1644,6 +1648,7 @@ class SysTotal {
         .map((e) => (e as num).toDouble())
         .toList(),
     manual: m['man'] == true,
+    unitCode: m['uc'] as String?,
   );
 }
 
@@ -1807,6 +1812,154 @@ List<int?> _sysCounts(RecognizedText rt) {
   return [total, elec];
 }
 
+// ── v96slip:begin ── إيصال ملخص الفحص الجديد (A2R Console v96): العناوين عربي + إنجليزي وكود الوحدة بالإنجليزي.
+// الإيصالات القديمة (v51 / v60-lite / v94) مفيهاش الكلمات دي، فبتتقرا بالطريقة القديمة زي ما هي من غير أي تغيير.
+// كود الوحدة → رقم الماكينة (نفس ترتيب الماكينات في الجدول، والترمنل بيتجاب من numToTid)
+const Map<String, int> kUnitCodeOrder = {
+  'ABIS-1': 1,
+  'ABIS-2': 2,
+  'ABIS-3': 3,
+  'BORG-1': 4,
+  'BORG-2': 5,
+  'BORG-3': 6,
+  'BORG-4': 7,
+  'MONTAZA-1': 8,
+  'MONTAZA-2': 9,
+  'MONTAZA-3': 10,
+  'MOHARRAM-1': 11,
+  'MOHARRAM-2': 12,
+  'AGAMY-1': 13,
+  'AGAMY-2': 14,
+  'QABBARY': 15,
+  'MKAMEL': 16,
+  'AMN': 17,
+  'PORT': 18,
+  'KHADAMAT': 19,
+  'ABIS-S': 20,
+  'BORG-S1': 21,
+  'BORG-S2': 22,
+  'MONTAZA-S': 23,
+  'MOHARRAM-S': 24,
+  'AGAMY-S': 25,
+};
+
+// كود الوحدة من نص الإيصال (متساهل مع غلطات الـ OCR: 0/O ، 1/I/l ، 5/S ، شرطة ناقصة أو مسافة)
+String? slipUnitCodeIn(String text) {
+  final up = text.toUpperCase();
+  final m1 = RegExp(
+    r'(?<![A-Z0-9])(AB[I1L|]S|B[O0]RG|M[O0]NTAZA|M[O0]HARRAM|AGAMY)\s?[-–—_.~]?\s?([S5][12]?|[1-4]|[I|L])(?![A-Z0-9])',
+  ).firstMatch(up);
+  if (m1 != null) {
+    final w = m1
+        .group(1)!
+        .replaceAll('0', 'O')
+        .replaceAll(RegExp(r'[1L|]'), 'I');
+    var n = m1.group(2)!.replaceAll('5', 'S');
+    if (RegExp(r'^[I|L]$').hasMatch(n)) n = '1';
+    final code = '$w-$n';
+    if (kUnitCodeOrder.containsKey(code)) return code;
+  }
+  final m2 = RegExp(
+    r'(?<![A-Z0-9])(QABBARY|MKAMEL|KHADAMAT|AMN|PORT)(?![A-Z0-9])',
+  ).firstMatch(up);
+  return m2?.group(1);
+}
+
+String? tidOfUnitCode(String? code) {
+  final n = code == null ? null : kUnitCodeOrder[code];
+  return n == null ? null : numToTid[n];
+}
+
+class SlipLabels {
+  int? total, card, manual, voids;
+  int hits = 0; // عدد العناوين الإنجليزي اللي اتلقت (TOTAL/CARD/MANUAL/VOID)
+}
+
+// الأعداد بالعناوين الإنجليزي: الرقم في نفس السطر (على الشمال) أو في سطر لوحده جنبه.
+SlipLabels slipLabelsOf(List<OcrLine> lines) {
+  final out = SlipLabels();
+  final labels = <RegExp>[
+    RegExp(r'(?<![A-Z])T[O0]TAL(?![A-Z])'),
+    RegExp(r'(?<![A-Z])C[A4]RD(?![A-Z])'),
+    RegExp(r'(?<![A-Z])MANU[A4]L(?![A-Z])'),
+    RegExp(r'(?<![A-Z])V[O0][I1L|]D(?![A-Z])'),
+  ];
+  final numRe = RegExp(
+    r'(?<![A-Za-z\d.,])(\d{1,3}(?:,\d{3})+|\d{1,5})(?![A-Za-z\d.,])',
+  );
+  final pureRe = RegExp(r'^[^A-Za-z\d]{0,3}(\d{1,3}(?:,\d{3})+|\d{1,5})[^A-Za-z\d]{0,3}$');
+  int? parseN(String g) => int.tryParse(g.replaceAll(',', ''));
+  final vals = List<int?>.filled(4, null);
+  for (var k = 0; k < 4; k++) {
+    for (final l in lines) {
+      final up = l.text.toUpperCase();
+      // "SYSTEM TOTAL" والمبلغ (EGP) مش من الأعداد
+      if (k == 0 && RegExp(r'SYS|STEM|EGP|E\s?G\s?P').hasMatch(up)) continue;
+      final lm = labels[k].firstMatch(up);
+      if (lm == null) continue;
+      if (vals[k] == null) out.hits++;
+      final rest = up.replaceRange(lm.start, lm.end, ' ');
+      final nm = numRe.firstMatch(rest);
+      int? v = nm == null ? null : parseN(nm.group(1)!);
+      if (v == null) {
+        // الرقم في سطر لوحده على نفس الارتفاع (ML Kit ساعات بيفصلهم)
+        double best = 1e9;
+        for (final o in lines) {
+          if (identical(o, l)) continue;
+          final pm = pureRe.firstMatch(o.text.trim());
+          if (pm == null) continue;
+          final h = math.max(l.h, o.h);
+          final dy = (o.cy - l.cy).abs();
+          if (dy > h * 0.6) continue;
+          if (dy < best) {
+            best = dy;
+            v = parseN(pm.group(1)!);
+          }
+        }
+      }
+      if (v != null) {
+        vals[k] = v;
+        break;
+      }
+    }
+  }
+  out
+    ..total = vals[0]
+    ..card = vals[1]
+    ..manual = vals[2]
+    ..voids = vals[3];
+  return out;
+}
+
+// [إجمالي العمليات، الإلكترونية] من العناوين، بنفس قاعدة التأكيد القديمة (الإجمالي = إلكترونية + يدوية (+ ملغية)).
+// null = مفيش أعداد مقروءة بالعناوين (نرجع للطريقة القديمة).
+List<int?>? slipCountsByLabels(SlipLabels lab) {
+  final t = lab.total, c = lab.card;
+  if (t == null) return null;
+  if (c == null || c > t) return [t, null];
+  final m = lab.manual, v = lab.voids;
+  if (m != null) {
+    final ok = t == c + m || (v != null && t == c + m + v);
+    if (!ok) return [t, null];
+  } else if (t != c) {
+    return [t, null];
+  }
+  return [t, c];
+}
+
+List<OcrLine> _linesFromText(String text) {
+  final out = <OcrLine>[];
+  var i = 0;
+  for (final t in text.split('\n')) {
+    final tt = t.trim();
+    if (tt.isEmpty) continue;
+    out.add(OcrLine(tt, 0, 100, i * 20.0, i * 20.0 + 14));
+    i++;
+  }
+  return out;
+}
+// ── v96slip:end ──
+
 SysTotal? parseSysConsole(
   String text,
   String file, {
@@ -1846,7 +1999,15 @@ SysTotal? parseSysConsole(
     printedish,
     amount != null,
   ].where((b) => b).length;
-  final strong = hasTitle || (titleish && extra >= 1) || extra >= 3;
+  // v96: العناوين الإنجليزي (TOTAL/CARD/MANUAL/VOID) موجودة بس في الإيصال الجديد
+  final slipLines = rt != null ? toLines(rt) : _linesFromText(text);
+  final lab = slipLabelsOf(slipLines);
+  final newSlip = lab.hits >= 2;
+  final strong =
+      hasTitle ||
+      (titleish && extra >= 1) ||
+      extra >= 3 ||
+      (newSlip && lab.hits >= 3 && amount != null);
 
   String? tid = findTerminalIn([text]);
   tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
@@ -1906,7 +2067,13 @@ SysTotal? parseSysConsole(
     printed =
         '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
-  final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
+  var cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
+  String? unitCode;
+  if (newSlip) {
+    final byLab = slipCountsByLabels(lab);
+    if (byLab != null) cnt = byLab;
+    unitCode = slipUnitCodeIn(text);
+  }
   return SysTotal(
     tid,
     amount,
@@ -1917,6 +2084,7 @@ SysTotal? parseSysConsole(
     txn: cnt[1],
     path: path,
     cands: cands,
+    unitCode: unitCode,
   );
 }
 
@@ -1950,6 +2118,7 @@ Future<SysTotal> _sysSecondRead(
       path: base.path.isNotEmpty ? base.path : sp2.path,
       cands: base.cands.isNotEmpty ? base.cands : sp2.cands,
       manual: base.manual,
+      unitCode: base.unitCode ?? sp2.unitCode,
     );
   } catch (_) {
     return base;
@@ -4195,6 +4364,23 @@ bool isPaymentPhoto(String text) {
     RegExp(r'NO\s*PIN|PLEASE\s*SIGN'),
   ];
   return marks.where((r) => r.hasMatch(up)).length >= 4;
+}
+
+// v96: صورة من فولدر الواتساب بتدخل البرنامج كباتش بس لو فيها علامة بنك أكيدة. أي صورة تانية
+// (شات، فاتورة محل، إعلان فيه TOTAL و SALE ...) بتتشال خالص: مش في النتايج ولا المراجعة ولا بتتنسخ ولا بتتعد.
+// الإيصال الحقيقي اللي مقروء وحش (فيه كلمة بنك واحدة على الأقل + علامة تانية) بيفضل يدخل المراجعة زي الأول.
+bool looksLikeBankDoc(String text) {
+  final up = text.toUpperCase();
+  if (findTerminalIn([text]) != null) return true;
+  if (_hasBatchClosedText(text)) return true;
+  if (RegExp(r'REPRINT|SUMMARY|DUPLICATE|SETTLEMENT').hasMatch(up)) return true;
+  final score = receiptScore(text);
+  if (score >= 3) return true;
+  final bankWord = RegExp(
+    r'TERMINAL|NATIONAL\s*BANK|\bNBE\b|BATCH|MERCHANT|SUCCESSF',
+  ).hasMatch(up);
+  // THANK YOU / GRAND TOTAL لوحدهم بيظهروا في فواتير وإعلانات، فلازم معاهم كلمة بنك
+  return bankWord && (score >= 2 || classifyReceipt(text) == 'batch');
 }
 
 // لو GRAND TOTAL = مجموع إجماليات الكروت (حتى لو أسماء الكروت اتقرت غلط): نرجّعه مؤكد.
@@ -10796,7 +10982,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           '${s.amount != null ? '${_fmtMoney(s.amount!)} ج.م' : '⚠️ المبلغ غير مقروء'}'
           '${s.tid == null ? ' • ⚠️ الترمنل غير مقروء' : ''}'
           '${s.txn != null ? ' • إلكترونية: ${s.txn}' : ''}'
-          '${s.tidFixFrom != null ? ' • اتقرا ${s.tidFixFrom} واتصحح بالمبلغ' : ''}'
+          '${s.tidFixFrom != null ? ' • اتقرا ${s.tidFixFrom} واتصحح ${s.unitCode != null ? 'بكود الوحدة ${s.unitCode}' : 'بالمبلغ'}' : ''}'
+          '${s.tidByAmt ? ' • الترمنل مش مقروء واتحدد بالمبلغ' : ''}'
           '${s.review != null ? ' • ⚠️ ${s.review}' : ''}',
           style: const TextStyle(fontSize: 12),
         ),
@@ -11490,7 +11677,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (sy0 != null) {
           if (sy0.tidFixFrom != null) {
             flags.add(
-              'ترمنل صورة السيستم اتقرا ${sy0.tidFixFrom} واتصحح بالمبلغ',
+              'ترمنل صورة السيستم اتقرا ${sy0.tidFixFrom} واتصحح ${sy0.unitCode != null ? 'بكود الوحدة' : 'بالمبلغ'}',
             );
           }
           if (sy0.amount == null) {
@@ -11894,6 +12081,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           final ct = c['tid'];
           if (ct is String && !terminals.containsKey(ct)) continue;
           final inRaw = f.path.startsWith('$rawImagesDir/');
+          // v96: الصورة دي هتتقرا تاني (ممكن تطلع مش مستند) فمتتنسخش من دلوقتي
+          if (ct == null &&
+              ((c['amt'] as num?) ?? 0) <= 0 &&
+              c['g96'] != true &&
+              !inRaw) {
+            continue;
+          }
           final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
           final noExt = dst.contains('.')
               ? dst.substring(0, dst.lastIndexOf('.'))
@@ -11941,6 +12135,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             if (hit && kind == 'receipt') {
               final ct = ce['tid'];
               if (ct is String && !terminals.containsKey(ct)) hit = false;
+              // v96: صورة واتساب اتسجلت قبل كده كإيصال ومفيهاش ترمنل ولا مبلغ: تتقرا تاني علشان تتشال لو مش مستند
+              if (ct == null &&
+                  ((ce['amt'] as num?) ?? 0) <= 0 &&
+                  ignPre != 'keep' &&
+                  manualPaths == null &&
+                  ce['g96'] != true &&
+                  !f.path.startsWith('$rawImagesDir/')) {
+                hit = false;
+              }
             }
             if (hit && kind == 'console') {
               final ca = (ce['amt'] as num?)?.toDouble();
@@ -11950,13 +12153,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   cd != null &&
                   (ca.toStringAsFixed(2) == cd ||
                       (ca < 32 && ce['man'] != true));
-              if (ce['tid'] == null || ce['cands'] == null || amtLooksDate)
+              if ((ce['tid'] == null && ce['uc'] == null) ||
+                  ce['cands'] == null ||
+                  amtLooksDate)
                 hit = false;
             }
             if (hit) {
               try {
                 File('$outputDir/ocr_debug.txt').writeAsStringSync(
-                  '##### ${baseName(f.path)} (من الكاش: $kind${kind == 'receipt' ? ' tid=${ce['tid']}' : ''})\n',
+                  kind == 'none'
+                      ? 'SKIP(مش مستند) ${baseName(f.path)} (من الكاش)\n'
+                      : '##### ${baseName(f.path)} (من الكاش: $kind${kind == 'receipt' ? ' tid=${ce['tid']}' : ''})\n',
                   mode: FileMode.append,
                 );
               } catch (_) {}
@@ -12126,6 +12333,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
 
           if (stopReq) break;
+          // v96: صورة واتساب مش مستند (مفيهاش علامة بنك أكيدة) → بتتشال خالص
+          var notDoc = false;
+          if (isReceipt &&
+              sysRot == null &&
+              manualPaths == null &&
+              ign != 'keep' &&
+              !f.path.startsWith('$rawImagesDir/') &&
+              !looksLikeBankDoc(res.text)) {
+            isReceipt = false;
+            notDoc = true;
+          }
           if (sysRot != null) {
             final spFull = stopReq
                 ? sysRot
@@ -12242,10 +12460,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             item.txn = a.txn;
             item.cands = a.cands;
 
-            _cachePut(
-              key,
-              _receiptToCache(item, workPath != f.path ? rotDeg : null),
-            );
+            _cachePut(key, {
+              ..._receiptToCache(item, workPath != f.path ? rotDeg : null),
+              'g96': true, // اتعدّى فحص "مستند ولا لأ" بتاع v96
+            });
             applyReceiptFix(item, fixes, key);
             receiptAt[i] = item;
             processedItems.add(item);
@@ -12265,6 +12483,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             }
           } else {
             _cachePut(fkey, {'k': 'none', 'ar': autoRotate});
+            try {
+              File('$outputDir/ocr_debug.txt').writeAsStringSync(
+                'SKIP(مش مستند) ${baseName(f.path)}${notDoc ? ' (كلمات قليلة من غير علامة بنك)' : ''}\n',
+                mode: FileMode.append,
+              );
+            } catch (_) {}
           }
         } catch (e) {
           warnings.add(
@@ -12310,7 +12534,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final s in sysReads) {
       if (s.tid == null) {
         warnings.add(
-          '${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا رقم الترمنل - مش محسوبة كباتش',
+          '${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا رقم الترمنل - هتتربط بالمبلغ لو مطابق لباتش ماكينة واحدة بس، وإلا "راجع الماكينة"',
         );
       }
       if (s.amount == null) {
@@ -13563,7 +13787,14 @@ class _SysReviewPageState extends State<SysReviewPage> {
     String? reviewNote;
     final b0 = best;
     if (b0 != null) {
-      final probe = SysTotal(b0.tid, b0.amount, b0.date, b0.printed, b0.file);
+      final probe = SysTotal(
+        b0.tid,
+        b0.amount,
+        b0.date,
+        b0.printed,
+        b0.file,
+        unitCode: b0.unitCode,
+      );
       _logSysFixes(
         reconcileSysTids([probe], batchAmtByTidOf(widget.allItems)),
       );
@@ -16608,10 +16839,69 @@ List<String> reconcileSysTids(
 ) {
   final logs = <String>[];
   bool eq(double a, double b) => (a - b).abs() < 0.005;
+  // ترمنلات صور سيستم تانية مقروءة/متأكدة (علشان المبلغ مايتربطش بماكينة ليها صورة سيستم بالفعل)
+  final claimed = <String>{
+    for (final o in sys)
+      if (o.tid != null && !o.tidByAmt) o.tid!,
+  };
   for (final s in sys) {
     s.review = null;
     if (s.manual) continue;
-    final tid = s.tid, amt = s.amount;
+    // v96: الترمنل اللي اتحدد بالمبلغ في مرة قبل كده بيتحسب من جديد (لو الباتشات اتغيرت)
+    if (s.tidByAmt) {
+      s.tid = null;
+      s.tidByAmt = false;
+    }
+    final amt = s.amount;
+    // v96: الإيصال الجديد فيه كود الوحدة بالإنجليزي → نتأكد إنه نفس ماكينة الترمنل
+    final codeTid = tidOfUnitCode(s.unitCode);
+    if (codeTid != null) {
+      final rt = s.tid;
+      if (rt == codeTid) continue; // الكود والترمنل متفقين
+      if (rt == null) {
+        s.tid = codeTid;
+        logs.add('SYS_CODE_TID ${s.unitCode}→$codeTid (${s.file})');
+        continue;
+      }
+      final ownR = amt == null ? null : batchByTid[rt];
+      if (ownR != null && eq(ownR, amt!)) {
+        // الترمنل المقروء مطابق لباتشه بالظبط: الكود هو اللي اتقرا غلط
+        logs.add('SYS_CODE_MISMATCH ${s.unitCode}≠$rt (المبلغ مطابق للترمنل) (${s.file})');
+        continue;
+      }
+      final codeBatch = batchByTid[codeTid];
+      final amtOk = codeBatch == null || (amt != null && eq(codeBatch, amt));
+      if (_tidDigitDist(rt, codeTid) <= 1 && amtOk) {
+        s.tidFixFrom ??= rt;
+        s.tid = codeTid;
+        logs.add('SYS_CODE_FIX $rt→$codeTid بكود الوحدة ${s.unitCode} (${s.file})');
+      } else {
+        s.review = 'راجع الماكينة: كود الوحدة ${s.unitCode} مش مطابق للترمنل $rt';
+      }
+      continue;
+    }
+    // v96: الترمنل مش مقروء (إيصال v51 مفيهوش ترمنل، أو المؤشر مغطي رقم) → بالمبلغ:
+    // باتش متأكد واحد بس بنفس المبلغ بالظبط = هي دي الماكينة، غير كده "راجع الماكينة"
+    if (s.tid == null) {
+      if (amt == null) continue;
+      final hits = [
+        for (final e in batchByTid.entries)
+          if (!claimed.contains(e.key) && eq(e.value, amt)) e.key,
+      ];
+      if (hits.length == 1) {
+        s.tid = hits.first;
+        s.tidByAmt = true;
+        logs.add(
+          'SYS_TID_BY_AMOUNT ${hits.first} بالمبلغ ${amt.toStringAsFixed(2)} (${s.file})',
+        );
+      } else if (hits.length > 1) {
+        s.review = 'راجع الماكينة: الترمنل مش مقروء والمبلغ مطابق لأكتر من ماكينة';
+      } else {
+        s.review = 'راجع الماكينة: الترمنل مش مقروء ومفيش باتش بنفس المبلغ';
+      }
+      continue;
+    }
+    final tid = s.tid;
     if (tid == null || amt == null || !terminals.containsKey(tid)) continue;
     final own = batchByTid[tid];
     if (own != null && eq(own, amt)) continue;
