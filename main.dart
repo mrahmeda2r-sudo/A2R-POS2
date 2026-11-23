@@ -1606,6 +1606,9 @@ class SysTotal {
   String? tidFixFrom; // الترمنل اللي اتقرا قبل ما يتصحح بالمبلغ (زي 0 اتقرت 1 في آخر رقم)
   String? unitCode; // v96: كود الوحدة بالإنجليزي من الإيصال الجديد (ABIS-1 ...). القديم مفيهوش
   bool tidByAmt = false; // الترمنل مش مقروء واتحدد بالمبلغ (بيتحسب من جديد كل مرة)
+  // شريط A2R SYS اللي تطبيق A2R بيحطه تحت صورة السيستم (الترمنل من الوحدة المختارة في A2R)
+  String? stripTid;
+  String? paperTid; // الترمنل المقروء من الورقة نفسها (قبل الشريط)
 
   SysTotal(
     this.tid,
@@ -1619,6 +1622,8 @@ class SysTotal {
     List<double>? cands,
     this.manual = false,
     this.unitCode,
+    this.stripTid,
+    this.paperTid,
   }) : cands = cands ?? <double>[];
 
   Map<String, dynamic> toJson() => {
@@ -1633,6 +1638,8 @@ class SysTotal {
     'cands': cands,
     'man': manual,
     if (unitCode != null) 'uc': unitCode,
+    if (stripTid != null) 'st': stripTid,
+    if (paperTid != null) 'pt': paperTid,
   };
 
   static SysTotal fromJson(Map m) => SysTotal(
@@ -1649,6 +1656,8 @@ class SysTotal {
         .toList(),
     manual: m['man'] == true,
     unitCode: m['uc'] as String?,
+    stripTid: m['st'] as String?,
+    paperTid: m['pt'] as String?,
   );
 }
 
@@ -1960,12 +1969,92 @@ List<OcrLine> _linesFromText(String text) {
 }
 // ── v96slip:end ──
 
+// ── sysstrip:begin ── شريط A2R SYS تحت صورة السيستم (تطبيق A2R بيكتبه من الوحدة المختارة):
+//   A2R SYS 50383702 MKAMEL 23.11.2026
+// الصور القديمة مفيهاش الشريط فبتتقرا بالطريقة القديمة زي ما هي.
+class SysStrip {
+  final String? tid; // الترمنل بعد التأكيد بالكود (null لو مش مقروء أو الرقم والكود مختلفين جامد)
+  final String? rawTid;
+  final String? code;
+  final Set<int> lines; // أرقام سطور الشريط في النص (بتتشال قبل قراءة الورقة)
+  SysStrip(this.tid, this.rawTid, this.code, this.lines);
+}
+
+final RegExp _stripMarkRe = RegExp(r'(?<![A-Z0-9])[A4][2Z]\s?R\s*[S5]\s?Y\s?[S5](?![A-Z])');
+
+String _stripDigits(String t) => t
+    .toUpperCase()
+    .replaceAll(RegExp('[OQD]'), '0')
+    .replaceAll(RegExp(r'[IL|!]'), '1')
+    .replaceAll('S', '5')
+    .replaceAll('B', '8')
+    .replaceAll('Z', '2');
+
+SysStrip? sysStripIn(String text) {
+  final ls = text.split('\n');
+  for (var i = 0; i < ls.length; i++) {
+    final up = ls[i].toUpperCase();
+    final m = _stripMarkRe.firstMatch(up);
+    if (m == null) continue;
+    final used = <int>{i};
+    var rest = up.substring(m.end).trim();
+    // ML Kit ممكن يقسم الشريط سطرين: "A2R SYS" لوحده والباقي في السطر اللي بعده
+    if (!RegExp(r'\d').hasMatch(rest) && i + 1 < ls.length) {
+      rest = ls[i + 1].toUpperCase().trim();
+      used.add(i + 1);
+    }
+    final toks = rest.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
+    String? raw;
+    for (var k = 0; k < toks.length && k < 3 && raw == null; k++) {
+      for (final cand in [
+        toks[k],
+        if (k + 1 < toks.length) toks[k] + toks[k + 1],
+      ]) {
+        final d = _stripDigits(cand).replaceAll(RegExp(r'[^0-9]'), '');
+        if (RegExp(r'^50\d{6}$').hasMatch(d) && _stripDigits(cand).replaceAll(RegExp(r'[^0-9A-Z]'), '').length == 8) {
+          raw = d;
+          break;
+        }
+      }
+    }
+    final code = slipUnitCodeIn(rest);
+    final codeTid = tidOfUnitCode(code);
+    final rawOk = raw != null && terminals.containsKey(raw);
+    String? tid;
+    if (rawOk && (codeTid == null || codeTid == raw)) {
+      tid = raw;
+    } else if (rawOk && codeTid != null) {
+      // رقم واحد فرق = الرقم اتقرا غلط والكود (حروف) أثبت. أكتر من كده = مش متأكدين
+      tid = _tidDigitDist(raw, codeTid) <= 1 ? codeTid : null;
+    } else {
+      tid = codeTid;
+    }
+    return SysStrip(tid, raw, code, used);
+  }
+  return null;
+}
+
+String _tidName(String t) {
+  final info = terminals[t];
+  return info == null ? t : '${machineLabel(info.orderNum)} ($t)';
+}
+// ── sysstrip:end ──
+
 SysTotal? parseSysConsole(
   String text,
   String file, {
   RecognizedText? rt,
   String path = '',
 }) {
+  // الشريط بيتقرا لوحده وبيتشال من النص، علشان قراءة الورقة نفسها تفضل زي ما هي
+  final strip = sysStripIn(text);
+  if (strip != null) {
+    final ls = text.split('\n');
+    text = [
+      for (var i = 0; i < ls.length; i++)
+        if (!strip.lines.contains(i)) ls[i],
+    ].join('\n');
+  }
   final up = text.toUpperCase();
   final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
   final printedM = RegExp(
@@ -2007,7 +2096,8 @@ SysTotal? parseSysConsole(
       hasTitle ||
       (titleish && extra >= 1) ||
       extra >= 3 ||
-      (newSlip && lab.hits >= 3 && amount != null);
+      (newSlip && lab.hits >= 3 && amount != null) ||
+      (strip?.tid != null && amount != null);
 
   String? tid = findTerminalIn([text]);
   tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
@@ -2024,6 +2114,14 @@ SysTotal? parseSysConsole(
   // قراءة غلط في رقم أو اتنين: أقرب ترمنل معروف (بشرط يكون واحد بس)
   tid ??= findTerminalFuzzyIn([text], null);
   tid ??= _findSysTidFuzzy(text);
+  final paperTid = tid;
+  final stripTid = strip?.tid;
+  // الشريط هو الأساس: لو الورقة مش مقروءة أو فرقها رقم واحد بس (غلطة قراءة) ناخد ترمنل الشريط.
+  // لو الورقة بتقول ماكينة مختلفة خالص، التأكيد بالمبلغ بيحصل في reconcileSysTids.
+  if (stripTid != null &&
+      (tid == null || tid == stripTid || _tidDigitDist(tid, stripTid) <= 1)) {
+    tid = stripTid;
+  }
   final cands = _sysCandidateAmounts(text);
   amount ??= cands.isNotEmpty ? cands.first : null;
 
@@ -2085,6 +2183,8 @@ SysTotal? parseSysConsole(
     path: path,
     cands: cands,
     unitCode: unitCode,
+    stripTid: stripTid,
+    paperTid: stripTid != null ? paperTid : null,
   );
 }
 
@@ -2119,6 +2219,8 @@ Future<SysTotal> _sysSecondRead(
       cands: base.cands.isNotEmpty ? base.cands : sp2.cands,
       manual: base.manual,
       unitCode: base.unitCode ?? sp2.unitCode,
+      stripTid: base.stripTid ?? sp2.stripTid,
+      paperTid: base.paperTid ?? sp2.paperTid,
     );
   } catch (_) {
     return base;
@@ -13794,6 +13896,8 @@ class _SysReviewPageState extends State<SysReviewPage> {
         b0.printed,
         b0.file,
         unitCode: b0.unitCode,
+        stripTid: b0.stripTid,
+        paperTid: b0.paperTid,
       );
       _logSysFixes(
         reconcileSysTids([probe], batchAmtByTidOf(widget.allItems)),
@@ -16853,6 +16957,36 @@ List<String> reconcileSysTids(
       s.tidByAmt = false;
     }
     final amt = s.amount;
+    // شريط A2R SYS: الترمنل من الوحدة المختارة في تطبيق A2R (مش من قراءة الشاشة)
+    final st = s.stripTid;
+    if (st != null) {
+      final paper = s.paperTid ?? tidOfUnitCode(s.unitCode);
+      if (paper == null || paper == st || _tidDigitDist(paper, st) <= 1) {
+        if (s.tid != st) {
+          s.tidFixFrom ??= s.tid;
+          s.tid = st;
+        }
+        logs.add('SYS_STRIP $st (${s.file})');
+        continue;
+      }
+      // الورقة بتقول ماكينة تانية خالص (الموظف مختار وحدة غلط في A2R، أو صوّر سيستم ماكينة تانية)
+      final bS = batchByTid[st], bP = batchByTid[paper];
+      if (amt != null && bS != null && eq(bS, amt)) {
+        s.tid = st;
+        logs.add('SYS_STRIP $st (الورقة $paper، المبلغ مطابق للشريط) (${s.file})');
+        continue;
+      }
+      if (amt != null && bP != null && eq(bP, amt)) {
+        s.tidFixFrom ??= st;
+        s.tid = paper;
+        logs.add('SYS_STRIP_MISMATCH شريط $st ≠ ورقة $paper، المبلغ مطابق للورقة (${s.file})');
+        continue;
+      }
+      s.tid = st;
+      s.review = 'راجع الماكينة: الشريط بيقول ${_tidName(st)} والورقة بتقول ${_tidName(paper)}';
+      logs.add('SYS_STRIP_MISMATCH شريط $st ≠ ورقة $paper (${s.file})');
+      continue;
+    }
     // v96: الإيصال الجديد فيه كود الوحدة بالإنجليزي → نتأكد إنه نفس ماكينة الترمنل
     final codeTid = tidOfUnitCode(s.unitCode);
     if (codeTid != null) {
@@ -16922,8 +17056,33 @@ List<String> reconcileSysTids(
       );
     } else if (hits.length > 1) {
       s.review = 'راجع الماكينة: المبلغ مطابق لأكتر من ماكينة';
-    } else if (own == null && nbrs.any(batchByTid.containsKey)) {
-      s.review = 'راجع الماكينة: مفيش باتش للترمنل $tid';
+    } else {
+      // مفيش تطابق بالظبط: لو باتش ماكينة جارة (فرق رقم واحد) قريب من المبلغ وأقرب بكتير من باتش الترمنل
+      // المقروء → غالباً الترمنل اتقرا غلط وفيه فرق حقيقي صغير (50383702 مصطفى كامل اتقرا 50383700 خدمات مصر
+      // وفرق 0.73). تنبيه بس، مش بنغيّر الماكينة.
+      final tol = math.max(5.0, amt * 0.01);
+      final ownDiff = own == null ? null : (own - amt).abs();
+      String? near;
+      double? nearDiff;
+      for (final k in nbrs) {
+        final b = batchByTid[k];
+        if (b == null) continue;
+        final d = (b - amt).abs();
+        if (d > tol) continue;
+        if (ownDiff != null && d >= ownDiff / 2) continue;
+        if (nearDiff == null || d < nearDiff) {
+          near = k;
+          nearDiff = d;
+        }
+      }
+      if (near != null) {
+        s.review = 'راجع الماكينة: ممكن تكون ${_tidName(near)} — مبلغ السيستم قريب من الباتش بتاعها';
+        logs.add(
+          'SYS_TID_NEAR $tid؟→$near فرق ${nearDiff!.toStringAsFixed(2)} (${s.file})',
+        );
+      } else if (own == null && nbrs.any(batchByTid.containsKey)) {
+        s.review = 'راجع الماكينة: مفيش باتش للترمنل $tid';
+      }
     }
   }
   return logs;
