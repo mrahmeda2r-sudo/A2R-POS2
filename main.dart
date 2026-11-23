@@ -1791,6 +1791,16 @@ List<int?> _sysCounts(RecognizedText rt) {
   if (nums.length < 2) return [null, null];
   final total = nums[0].value, elec = nums[1].value;
   if (elec > total) return [null, null];
+  // تأكيد: إجمالي العمليات = الإلكترونية + اليدوية (+ الملغية). لو مش متطابقين يبقى رقم اتقرا غلط
+  // (زي 79 تتقرا 19 من صورة الشاشة)، فمش بنعتمد رقم الإلكترونية بدل ما يطلع فرق وهمي.
+  if (nums.length >= 3) {
+    final manual = nums[2].value;
+    final cancelled = nums.length >= 4 ? nums[3].value : null;
+    final okSum =
+        total == elec + manual ||
+        (cancelled != null && total == elec + manual + cancelled);
+    if (!okSum) return [total, null];
+  }
   return [total, elec];
 }
 
@@ -11454,12 +11464,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
         if (r.reprintSummary) flags.add('تحذير: REPRINT أو SUMMARY');
         if (r.missingBatchClosed) flags.add('غير مكتوب BATCH CLOSED');
+        // مقارنة بالسيستم: أي فرق في المبلغ (ولو قرش) أو في عدد المعاملات لازم يظهر، مش ✓
+        final sy0 = (r.ignoredDoc || r.userExcluded) ? null : _sysOf(r);
+        if (sy0 != null) {
+          if (sy0.amount == null) {
+            flags.add('مبلغ السيستم محتاج مراجعة');
+          } else {
+            final dA = _sysDiffOf(r);
+            if (dA != null && dA != 0) {
+              flags.add(
+                '${dA.abs() < 1 ? 'فرق قروش عن السيستم — راجع' : 'فرق عن السيستم'}: '
+                '${dA > 0 ? '+' : ''}${dA.toStringAsFixed(2)}',
+              );
+            }
+          }
+          if (sy0.txn != null && r.orderNum != null) {
+            var tx = 0;
+            var txOk = true;
+            for (final x in processedItems) {
+              if (!x.counts || x.orderNum != r.orderNum) continue;
+              if (x.txn == null) {
+                txOk = false;
+                break;
+              }
+              tx += x.txn!;
+            }
+            if (txOk && tx != sy0.txn) {
+              flags.add('معاملات الباتش $tx والسيستم ${sy0.txn}');
+            }
+          }
+        }
         if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
         final txnStr = r.txn != null ? ' | معاملات: ${r.txn}' : '';
         final sy = (r.ignoredDoc || r.userExcluded) ? null : _sysOf(r);
-        final sysTxt = sy != null ? ' | السيستم: ${_fmtMoney(sy.amount!)}' : '';
+        final sysTxt = sy != null
+            ? ' | السيستم: ${sy.amount == null ? '؟' : _fmtMoney(sy.amount!)}'
+            : '';
         sb.writeln(
           '$mark ${baseName(r.path)}  ${r.unitName ?? '??'}  '
           '${r.amount.toStringAsFixed(2)}$txnStr$sysTxt$extra',
@@ -11779,7 +11821,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
     try {
-      File('$outputDir/ocr_debug.txt').writeAsStringSync('');
+      File('$outputDir/ocr_debug.txt').writeAsStringSync(
+        '# فحص التقفيل ${DateTime.now().toString().substring(0, 19)}\n'
+        '# الصور اللي اتقرت قبل كده بتتاخد من الكاش ومش بتتقري تاني، فبيتكتبلها سطر (من الكاش) بس.\n'
+        '# عدّ إيصالات الدفع بيتكتب في id_debug.txt مش هنا.\n\n',
+      );
     } catch (_) {}
     final fixes = loadFixes();
     final rawReceipts = <ReceiptItem>[];
@@ -11881,6 +11927,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 hit = false;
             }
             if (hit) {
+              try {
+                File('$outputDir/ocr_debug.txt').writeAsStringSync(
+                  '##### ${baseName(f.path)} (من الكاش: $kind${kind == 'receipt' ? ' tid=${ce['tid']}' : ''})\n',
+                  mode: FileMode.append,
+                );
+              } catch (_) {}
               if (kind == 'console') {
                 final cs0 = SysTotal.fromJson({
                   ...ce,
@@ -16470,7 +16522,7 @@ class MResult {
   // فرق بسيط (أقل من kSoftGap إيصالات، ناقص أو زيادة): الملف سليم ومش بيدخل المراجعة، بس عليه علامة تحذير ⚠️
   bool get softWarn {
     if (excluded || pending || verdict != 0 || !ok) return false;
-    final sl = _statsOf(this).seqLen;
+    final sl = _seqLenReliable(this);
     final g = sl == null ? null : count - sl;
     final d = _batchDiff(this);
     return (g != null && g != 0 && g.abs() < kSoftGap) ||
@@ -16830,6 +16882,15 @@ _NoteKind _noteKindOf(String n) {
   return _kNoteKinds.last;
 }
 
+// طول تسلسل الـ RRN بس لو أرقام RRN اتقرت لـ 80% من الإيصالات على الأقل (نفس شرط ملاحظة التسلسل).
+// لو القراءة أقل من كده، المدى المحسوب من كام رقم مقروء مالوش معنى (مثلاً "زيادة 129") فمش بنعرضه كفرق.
+int? _seqLenReliable(MResult r) {
+  final s = _statsOf(r);
+  if (s.seqLen == null || s.full == null || r.count <= 0) return null;
+  if (s.full! < r.count * 0.8) return null;
+  return s.seqLen;
+}
+
 class _MStats {
   int? pages, full, partial, seqMin, seqMax, seqLen;
 }
@@ -17097,7 +17158,7 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
   final soft = _batchSoft(r);
   final batch = _mBatchShown(r);
   final sys = _mSysShown(r);
-  final seqLen = _statsOf(r).seqLen;
+  final seqLen = _seqLenReliable(r);
   String v(int? x) => x == null ? '—' : '$x';
   MaterialColor? gap(int? x) {
     if (r.verdict > 0 || x == null || x == r.count) return null;
@@ -17796,7 +17857,16 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
           _l(context, 'العدد المتوقع من التسلسل', 'Expected from sequence'),
           '${stats.seqLen}',
         ),
-      if (stats.seqLen != null && !r.pending)
+      if (stats.seqLen != null && !r.pending && _seqLenReliable(r) == null)
+        kv(
+          _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
+          _l(
+            context,
+            'مش محسوب: أرقام RRN المقروءة قليلة (${stats.full ?? 0} من ${r.count})',
+            'Not computed: too few RRNs read (${stats.full ?? 0} of ${r.count})',
+          ),
+        ),
+      if (stats.seqLen != null && !r.pending && _seqLenReliable(r) != null)
         kv(
           _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
           r.count == stats.seqLen
