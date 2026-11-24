@@ -1442,6 +1442,22 @@ Future<void> waitQuickIdle() async {
   }
 }
 
+// v97: الأذونات اللي الفحص التلقائي محتاجها (من غير ما نطلبها): بترجع أسامي الناقص
+Future<List<String>> autoPermMissing() async {
+  final out = <String>[];
+  try {
+    if (!(await Permission.manageExternalStorage.status).isGranted) {
+      out.add('إذن الوصول لكل الملفات');
+    }
+  } catch (_) {}
+  try {
+    if (!(await Permission.notification.status).isGranted) {
+      out.add('إذن الإشعارات');
+    }
+  } catch (_) {}
+  return out;
+}
+
 // قفل خدمة الخلفية بس لو مفيش فحص تلقائي شغال في أي تاب
 Future<void> stopKeepAliveSafe() async {
   if (homeAutoG || machAutoG) return;
@@ -2310,6 +2326,7 @@ Map<String, dynamic> _receiptToCache(ReceiptItem it, int? rot) => {
   'txn': it.txn,
   'cands': it.cands,
   'rot': rot,
+  if (it.multiNote != null) 'mn': it.multiNote,
 };
 
 ReceiptItem _receiptFromCache(Map<String, dynamic> c, String key, String path) {
@@ -2336,6 +2353,7 @@ ReceiptItem _receiptFromCache(Map<String, dynamic> c, String key, String path) {
   item.cands = ((c['cands'] as List?) ?? const [])
       .map((e) => (e as num).toDouble())
       .toList();
+  item.multiNote = c['mn'] as String?;
   return item;
 }
 
@@ -4152,6 +4170,85 @@ List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   return [lines];
 }
 
+// v97: صورة فيها إيصالين باتش (أو أكتر) جنب بعض، بس شريط A2R اللي تحتهم (الاسم | الوحدة + التاريخ)
+// بيعدّي على العمودين فبيلزقهم في عمود واحد، فكان بيتقرا باتش واحد بس.
+// هنا بنقسم عند الفاصل الرأسي اللي أقل سطور بتعدّي عليه، والسطور المعدّية (الشريط) بتتشال من الإيصالات.
+// بيشتغل بس لو الصورة فيها علامتين باتش على الأقل (BATCH CLOSED / BATCH NO / GRAND مرتين)،
+// فصورة الإيصال الواحد عمرها ما بتدخل هنا ونتيجتها زي الأول بالظبط.
+bool _twoBatchMarks(String t) {
+  int c(String p) => RegExp(p, caseSensitive: false).allMatches(t).length;
+  return c(r'BATCH\s*C\s*L') >= 2 ||
+      c(r'BATCH\s*N\s*[O0]') >= 2 ||
+      c(r'GRAND') >= 2;
+}
+
+bool _slipSide(List<OcrLine> g, double w) {
+  if (g.length < 6) return false;
+  final gl = g.map((e) => e.left).reduce(math.min);
+  final gr = g.map((e) => e.right).reduce(math.max);
+  if (gr - gl < w * 0.12) return false;
+  final t = readingText(g);
+  return receiptScore(t) >= 3 &&
+      RegExp(r'BATCH|GRAND|SUCCESSF', caseSensitive: false).hasMatch(t) &&
+      amountsIn(t).isNotEmpty;
+}
+
+List<List<OcrLine>>? splitBridged(List<OcrLine> lines, [int depth = 0]) {
+  if (lines.length < 12) return null;
+  final minL = lines.map((e) => e.left).reduce(math.min);
+  final maxR = lines.map((e) => e.right).reduce(math.max);
+  final w = maxR - minL;
+  if (w <= 0) return null;
+  final lo = minL + w * 0.2, hi = minL + w * 0.8;
+  final xs = <double>{};
+  for (final l in lines) {
+    for (final x in [l.right + 0.5, l.left - 0.5]) {
+      if (x > lo && x < hi) xs.add(x);
+    }
+  }
+  int? bestCross;
+  var bestBal = -1;
+  double? bestX;
+  for (final x in xs) {
+    var nl = 0, nr = 0, nc = 0;
+    for (final l in lines) {
+      if (l.right <= x) {
+        nl++;
+      } else if (l.left >= x) {
+        nr++;
+      } else {
+        nc++;
+      }
+    }
+    if (nl < 6 || nr < 6) continue;
+    final bal = math.min(nl, nr);
+    if (bestCross == null || nc < bestCross || (nc == bestCross && bal > bestBal)) {
+      bestCross = nc;
+      bestBal = bal;
+      bestX = x;
+    }
+  }
+  if (bestX == null || bestCross == null) return null;
+  if (bestCross > math.max(3, (lines.length * 0.08).floor())) return null;
+  final left = [for (final l in lines) if (l.right <= bestX) l];
+  final right = [for (final l in lines) if (l.left >= bestX) l];
+  if (!_slipSide(left, w) || !_slipSide(right, w)) return null;
+  final out = <List<OcrLine>>[];
+  for (final side in [left, right]) {
+    final sub = (depth < 2 && _twoBatchMarks(readingText(side)))
+        ? splitBridged(side, depth + 1)
+        : null;
+    out.addAll(sub ?? [side]);
+  }
+  return out.length <= 4 ? out : null;
+}
+
+String _bnoShort(String? b) {
+  if (b == null) return '؟';
+  final t = b.replaceFirst(RegExp(r'^0+(?=\d)'), '');
+  return t.isEmpty ? b : t;
+}
+
 // ───────────── المبالغ ─────────────
 final RegExp _amountRe = RegExp(
   r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)",
@@ -4754,6 +4851,7 @@ class Analysis {
   String debug = '';
   int? txn; // عدد معاملات الباتش (من إيصال الإقفال)
   List<double> cands = <double>[]; // مبالغ مقترحة من نفس الإيصال (الأرجح الأول)
+  String? multiNote; // v97: "اتجمع باتشين: 394 + 395" أو تنبيه ماكينتين مختلفتين
   Analysis(
     this.tid,
     this.how,
@@ -4768,13 +4866,24 @@ class Analysis {
 
 // تحليل صورة كاملة (ممكن فيها أكتر من إيصال)
 Analysis analyzeLines(List<OcrLine> all) {
-  final pieces = splitColumns(all);
+  var pieces = splitColumns(all);
+  var bridged = false;
+  if (pieces.length == 1 && _twoBatchMarks(readingText(all))) {
+    final sb = splitBridged(all);
+    if (sb != null && sb.length > 1) {
+      pieces = sb;
+      bridged = true;
+    }
+  }
   final multi = pieces.length > 1;
   final allTexts = <String>[];
   final batches = <double>[];
   final txns = <int?>[];
+  final bnos = <String?>[];
+  final ptids = <String?>[];
   var allOk = true;
   final seen = <String>{};
+  final seenB = <String, double>{};
 
   final dbg = StringBuffer('pieces=${pieces.length}\n');
   for (final pc in pieces) {
@@ -4792,16 +4901,37 @@ Analysis analyzeLines(List<OcrLine> all) {
     final b = batchNo(r.texts);
     final key = '$b|${r.val}';
     if (b != null && seen.contains(key)) continue; // نفس الباتش اتصور مرتين
+    final pt = multi ? findTerminalIn(r.texts) : null;
+    if (multi && b != null) {
+      // v97: نفس رقم الباتش لنفس الماكينة بمبلغ مختلف = نفس الإيصال اتقرا مرتين، منجمعهوش
+      final bk = '$pt|$b';
+      final prev = seenB[bk];
+      if (prev != null) {
+        if ((prev - r.val).abs() >= 0.005) allOk = false;
+        continue;
+      }
+      seenB[bk] = r.val;
+    }
     seen.add(key);
     batches.add(r.val);
     txns.add(batchTxnOf(r.texts));
+    bnos.add(b);
+    ptids.add(pt);
     allOk = allOk && r.ok;
+  }
+  if (bridged) {
+    // سطور الشريط اللي اتشالت من الإيصالات: بتفضل للتاريخ/الوحدة بس
+    final used = <OcrLine>{for (final pc in pieces) ...pc};
+    final rest = [for (final l in all) if (!used.contains(l)) l];
+    if (rest.isNotEmpty) allTexts.add(readingText(rest));
   }
   var total = round2(batches.fold(0.0, (a, b) => a + b));
   var ok = allOk && batches.isNotEmpty;
+  final distinctB = {for (final b in bnos) if (b != null) b}.length >= 2;
 
   // شبكة أمان: لو التقسيم مش مؤكد جرّب الصورة كلها
-  if (multi && !ok) {
+  // (v97: إلا لو الصورة فيها باتشات مختلفة فعلاً: الصورة كلها بتقرا باتش واحد بس وبتضيّع التاني)
+  if (multi && !ok && !bridged && !distinctB) {
     final r = ocrPiece(all);
     allTexts.addAll(r.texts);
     if (r.val > 0 && (r.ok || batches.isEmpty)) {
@@ -4813,6 +4943,10 @@ Analysis analyzeLines(List<OcrLine> all) {
       txns
         ..clear()
         ..add(batchTxnOf(r.texts));
+      bnos
+        ..clear()
+        ..add(batchNo(r.texts));
+      ptids.clear();
     }
   }
 
@@ -4844,8 +4978,36 @@ Analysis analyzeLines(List<OcrLine> all) {
       how = 'name/merchant';
     }
   }
+  String? multiNote;
+  final tidSet = {for (final t in ptids) if (t != null) t};
+  if (tidSet.length >= 2) {
+    // v97: باتشين لماكينتين مختلفتين في صورة واحدة: منجمعش، بناخد اللي للماكينة الأساسية بس ونراجع
+    final keep = <int>[
+      for (var i = 0; i < batches.length; i++)
+        if (ptids[i] == null || ptids[i] == tid) i,
+    ];
+    if (keep.isNotEmpty && keep.length < batches.length) {
+      final kb = [for (final i in keep) batches[i]];
+      final kt = [for (final i in keep) txns[i]];
+      batches
+        ..clear()
+        ..addAll(kb);
+      txns
+        ..clear()
+        ..addAll(kt);
+      total = round2(batches.fold(0.0, (a, b) => a + b));
+    }
+    ok = false;
+    multiNote =
+        'الصورة فيها باتشين لماكينتين مختلفتين (${tidSet.join(' و ')}) — راجع';
+  } else if (batches.length >= 2 && bnos.length == batches.length) {
+    final n = batches.length;
+    multiNote =
+        'اتجمع ${n == 2 ? 'باتشين' : '$n باتشات'}: ${bnos.map(_bnoShort).join(' + ')}';
+  }
   final result = Analysis(tid, how, row, name, total, ok, batches, date);
-  result.debug = dbg.toString();
+  result.multiNote = multiNote;
+  result.debug = (bridged ? 'split=bridged\n' : '') + dbg.toString();
   result.cands = candidateAmounts(allTexts);
   result.txn = (txns.isNotEmpty && txns.every((e) => e != null))
       ? txns.fold<int>(0, (a, e) => a + e!)
@@ -4901,6 +5063,7 @@ double? mergeSecondRead(Analysis a, Analysis b) {
   if (a.val <= 0) {
     a.val = b.val;
     a.ok = b.ok;
+    a.multiNote = b.multiNote;
     a.batches = [...b.batches];
     a.txn = b.txn ?? a.txn;
     return null;
@@ -4910,6 +5073,7 @@ double? mergeSecondRead(Analysis a, Analysis b) {
     // الأولى مش مؤكدة والتانية مؤكدة بمجموع الكروت -> نعتمد التانية
     a.val = b.val;
     a.ok = true;
+    a.multiNote = b.multiNote;
     a.batches = [...b.batches];
     a.txn = b.txn ?? a.txn;
     return null;
@@ -7494,6 +7658,7 @@ class ReceiptItem {
   bool missingBatchClosed;
   List<double> cands =
       <double>[]; // مبالغ مقترحة من الإيصال (للاختيار في المراجعة)
+  String? multiNote; // v97: كذا باتش في نفس الصورة
 
   ReceiptItem({
     required this.path,
@@ -7554,6 +7719,7 @@ class ReceiptItem {
     'rep': reprintSummary,
     'nobc': missingBatchClosed,
     'cands': cands,
+    if (multiNote != null) 'mn': multiNote,
   };
 
   static ReceiptItem fromJson(Map m) {
@@ -7593,6 +7759,7 @@ class ReceiptItem {
     it.cands = ((m['cands'] as List?) ?? const [])
         .map((e) => (e as num).toDouble())
         .toList();
+    it.multiNote = m['mn'] as String?;
     return it;
   }
 
@@ -8078,6 +8245,9 @@ void applyReceiptFix(ReceiptItem item, Map<String, dynamic> fixes, String key) {
   if (fx is Map) {
     final v = fx['val'];
     if (v is num && v > 0) {
+      if ((round2(v.toDouble()) - item.amount).abs() >= 0.005) {
+        item.multiNote = null;
+      }
       item.amount = round2(v.toDouble());
       item.batches = [item.amount];
     }
@@ -9845,14 +10015,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // الفحص الخفيف مقفول افتراضياً في كل تشغيل: مفيش مراقبة ولا خدمة خلفية إلا لما تفعّله بإيدك
-    autoScan = false;
-    homeAutoG = false;
+    // v97: الفحص التلقائي بيفضل على آخر حالة انت سبته عليها: لو كان شغال بيرجع يشتغل لوحده أول ما التطبيق يفتح،
+    // وما بيتقفلش غير لما تقفله انت بإيدك (أو "رجّع كل الإعدادات للافتراضي").
     final cfg0 = _readCfg();
-    if (cfg0['autoScan'] == true) {
-      cfg0['autoScan'] = false;
-      _writeCfg(cfg0);
-    }
+    autoScan = cfg0['autoScan'] == true;
+    homeAutoG = autoScan;
     homeRunG = () => runFullPipeline();
     homeSumG = _countLine;
     openReqG.addListener(_onOpenReqHome);
@@ -9865,6 +10032,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
     _restoreClosing();
+    if (autoScan) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resumeAuto());
+    }
+  }
+
+  // v97: رجوع الفحص التلقائي بعد فتح التطبيق من غير ما نسأل عن أي إذن تاني.
+  // لو إذن اتشال: الفحص يفضل مفعّل، وبنقولك إيه الناقص بدل ما يقف من غير ما تعرف.
+  Future<void> _resumeAuto() async {
+    if (!mounted || !autoScan) return;
+    final miss = await autoPermMissing();
+    if (!mounted || !autoScan) return;
+    _startAuto();
+    if (miss.isNotEmpty && !busy) {
+      setState(
+        () => status =
+            '⚠️ الفحص التلقائي لسه مفعّل، بس ناقصه: ${miss.join(' و ')}. افتحه من إعدادات التليفون علشان يشتغل صح.',
+      );
+    }
   }
 
   void _syncDays() {
@@ -11010,6 +11195,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       item.alt = alt;
       item.txn = a.txn;
       item.cands = a.cands;
+      item.multiNote = a.multiNote;
       item.reprintSummary = hasReprint;
       item.missingBatchClosed = !hasBatchClosed;
       if (item.key.isNotEmpty) {
@@ -11617,6 +11803,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             '= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}',
             style: small,
           ),
+        if (item.multiNote != null)
+          w.Text('🧾 ${item.multiNote}', style: small),
         // سطر السيستم كامل (المبلغ + مطابق/الفرق) من غير قطع
         if (sl != null)
           Padding(
@@ -11690,9 +11878,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
     final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
-    final bt = item.batches.length > 1
-        ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
-        : '';
+    final bt =
+        (item.batches.length > 1
+            ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
+            : '') +
+        (item.multiNote != null ? '\n🧾 ${item.multiNote}' : '');
     final alt = item.alt != null
         ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}'
         : '';
@@ -11770,6 +11960,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           flags.add('رقم الماكينة: ${r.how}');
         }
         if (r.batches.length > 1) flags.add('${r.batches.length} باتشات');
+        if (r.multiNote != null) flags.add(r.multiNote!);
         if (r.alt != null)
           flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
         if (r.reprintSummary) flags.add('تحذير: REPRINT أو SUMMARY');
@@ -12561,6 +12752,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             );
             item.txn = a.txn;
             item.cands = a.cands;
+            item.multiNote = a.multiNote;
 
             _cachePut(key, {
               ..._receiptToCache(item, workPath != f.path ? rotDeg : null),
@@ -16301,6 +16493,11 @@ class _ReviewPageState extends State<ReviewPage> {
             Text(
               'مجموع الباتشات: ${it.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}',
             ),
+          if (it.multiNote != null)
+            Text(
+              '🧾 ${it.multiNote}',
+              style: TextStyle(color: _tintFg(context, kReviewTone)),
+            ),
           if (it.alt != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -19912,14 +20109,10 @@ class _MachinesPageState extends State<MachinesPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     pdfDir = loadPdfDir();
-    // الفحص الخفيف مقفول افتراضياً في كل تشغيل: مفيش مراقبة ولا خدمة خلفية إلا لما تفعّله بإيدك
-    autoScan = false;
-    machAutoG = false;
+    // v97: الفحص التلقائي بيفضل على آخر حالة انت سبته عليها، وما بيتقفلش غير بإيدك
     final cfgM = _readCfg();
-    if (cfgM['autoScanM'] == true) {
-      cfgM['autoScanM'] = false;
-      _writeCfg(cfgM);
-    }
+    autoScan = cfgM['autoScanM'] == true;
+    machAutoG = autoScan;
     machRunG = () => _startCountAll();
     machSumG = _countLine;
     openReqG.addListener(_onOpenReqM);
@@ -19935,6 +20128,25 @@ class _MachinesPageState extends State<MachinesPage>
       status = pend > 0
           ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"فحص إيصالات الدفع\" لما تحب.'
           : 'آخر نتيجة: ${results.length} ملف.';
+    }
+    if (autoScan) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resumeAuto());
+    }
+  }
+
+  // v97: رجوع الفحص التلقائي بعد فتح التطبيق (نفس اللي بيحصل لما تفعّله، من غير ما نسأل عن أذونات تاني)
+  Future<void> _resumeAuto() async {
+    if (!mounted || !autoScan) return;
+    final miss = await autoPermMissing();
+    if (!mounted || !autoScan) return;
+    _doneSig = _scanSig(); // زي التفعيل بالظبط: الجديد بس هو اللي يتعدّ تلقائي
+    _pendSig = '';
+    _startAuto();
+    if (miss.isNotEmpty) {
+      setState(
+        () => status =
+            '⚠️ الفحص التلقائي لسه مفعّل، بس ناقصه: ${miss.join(' و ')}. افتحه من إعدادات التليفون علشان يشتغل صح.',
+      );
     }
   }
 
