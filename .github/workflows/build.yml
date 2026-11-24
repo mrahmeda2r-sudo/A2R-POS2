@@ -914,6 +914,23 @@ jobs:
 
               override fun onBind(intent: Intent?): IBinder? = null
 
+              // v97: لو التطبيق اتقفل من قايمة التطبيقات (سحبته)، المراقبة بتقف مع التطبيق نفسه.
+              // بدل ما نسيب إشعار "مراقبة" شغال على الفاضي: نقفل الخدمة ونبعت إشعار تضغط عليه يرجّع الفحص التلقائي.
+              override fun onTaskRemoved(rootIntent: Intent?) {
+                  try {
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      nm.notify(9, NotifHelper.build(this, "pos_alert2", "تنبيه مشاكل الفحص",
+                          "⚠️ A2R POS - الفحص التلقائي وقف",
+                          "التطبيق اتقفل من قايمة التطبيقات. اضغط هنا وهو هيرجع يشتغل لوحده.", false, null, 9))
+                  } catch (e: Exception) {
+                  }
+                  try {
+                      stopSelf()
+                  } catch (e: Exception) {
+                  }
+                  super.onTaskRemoved(rootIntent)
+              }
+
               override fun onDestroy() {
                   try {
                       wl?.release()
