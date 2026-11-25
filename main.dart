@@ -1625,6 +1625,8 @@ class SysTotal {
   // شريط A2R SYS اللي تطبيق A2R بيحطه تحت صورة السيستم (الترمنل من الوحدة المختارة في A2R)
   String? stripTid;
   String? paperTid; // الترمنل المقروء من الورقة نفسها (قبل الشريط)
+  int? manualTotal; // إجمالي العمليات اللي اتكتب يدوي من شاشة التعديل (بيتحفظ مع التصحيح)
+  String? reviewedMsg; // نص المراجعة اللي اتأكد عليها بـ ✓ (بيتحفظ مع التصحيح)
 
   SysTotal(
     this.tid,
@@ -2401,7 +2403,7 @@ void _publishClosing(
   // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
   final latest = <String, SysTotal>{};
   for (final sy in sys) {
-    if (sy.tid == null || sy.txn == null) continue;
+    if (sy.tid == null || sysCountOf(sy) == null) continue;
     final p = latest[sy.tid!];
     if (p == null || sy.printed.compareTo(p.printed) > 0) latest[sy.tid!] = sy;
   }
@@ -2409,8 +2411,8 @@ void _publishClosing(
   for (final e in latest.entries) {
     final n = terminals[e.key]?.orderNum;
     if (n != null) {
-      sums[n] = e.value.txn!;
-      sysMap[n] = e.value.txn!;
+      sums[n] = sysCountOf(e.value)!;
+      if (e.value.txn != null) sysMap[n] = e.value.txn!; // تبويب إيصالات الدفع يفضل على الإلكتروني زي ما هو
     }
   }
   sysTxnByNum = sysMap;
@@ -8295,6 +8297,8 @@ void saveSysFix(SysTotal value) {
       'tx': value.txn,
       'ta': value.txnAll,
       'cnt': true,
+      if (value.reviewedMsg != null) 'rv': value.reviewedMsg,
+      if (value.manualTotal != null) 'mt': value.manualTotal,
     };
     m['sys:${value.file}'] = record;
     final path = _sysImagePath(value);
@@ -8322,6 +8326,8 @@ void applySysFix(SysTotal s) {
     s.amount = round2(a.toDouble());
     s.manual = true;
   }
+  if (fx['rv'] is String) s.reviewedMsg = fx['rv'] as String;
+  if (fx['mt'] is num) s.manualTotal = (fx['mt'] as num).toInt();
   if (fx['cnt'] == true) {
     s.txn = (fx['tx'] as num?)?.toInt();
     s.txnAll = (fx['ta'] as num?)?.toInt();
@@ -9916,6 +9922,50 @@ Color _unitColor(int? row) {
 }
 
 // ───────────────────── الشاشة الرئيسية ─────────────────────
+// صفحة صور السيستم: نفس خواص صفحة الباتشات لكن لصور السيستم بس
+class SystemPhotosPage extends StatefulWidget {
+  final _HomePageState home;
+  const SystemPhotosPage({super.key, required this.home});
+  @override
+  State<SystemPhotosPage> createState() => _SystemPhotosPageState();
+}
+
+class _SystemPhotosPageState extends State<SystemPhotosPage> {
+  String q = '';
+  int sort = 1;
+  bool reviewOnly = false;
+  final TextEditingController searchCtl = TextEditingController();
+
+  @override
+  void dispose() {
+    searchCtl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.home;
+    return ValueListenableBuilder<int>(
+      valueListenable: h._sysTick,
+      builder: (c, _, __) => Scaffold(
+        appBar: AppBar(title: const w.Text('صور السيستم')),
+        bottomNavigationBar: _scanBar(
+          busy: h.busy,
+          stopReq: h.stopReq,
+          onStop: () => h.setState(() {
+            chainAbort = true;
+            h.stopReq = true;
+          }),
+          thisLabel: 'فحص التقفيل',
+          onScanThis: () => h.runFullPipeline(),
+          progress: h.progress,
+        ),
+        body: h._sysPageBody(this),
+      ),
+    );
+  }
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -11697,6 +11747,360 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return l;
   }
 
+  final ValueNotifier<int> _sysTick = ValueNotifier<int>(0);
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _sysTick.value++;
+  }
+
+  // مفتاح صغير من غير أي كلمة: مقفول في التقفيل، مفتوح في صفحة صور السيستم
+  Widget _sysSwitch(bool on) => Padding(
+    padding: const EdgeInsets.only(top: 2),
+    child: Transform.scale(
+      scale: 0.7,
+      child: Switch(
+        value: on,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        onChanged: (v) {
+          if (on) {
+            Navigator.of(context).maybePop();
+          } else {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => SystemPhotosPage(home: this)),
+            );
+          }
+        },
+      ),
+    ),
+  );
+
+  // صف الشريط + السويتش: السويتش دايماً على الشمال الفعلي من الشريط (بغض النظر عن اتجاه اللغة)
+  Widget _sysStripRow(Widget strip, bool on) => Row(
+    textDirection: TextDirection.ltr,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _sysSwitch(on),
+      Expanded(
+        child: Directionality(
+          textDirection: Directionality.of(context),
+          child: strip,
+        ),
+      ),
+    ],
+  );
+
+  // ✓ على كارت سيستم: تأكيد مراجعة بس (مبيمسحش فرق المبلغ/العدد). ناقص ترمنل/مبلغ: يفتح التعديل
+  Future<void> _sysConfirm(SysTotal s) async {
+    if (s.tid == null || s.amount == null) {
+      await editSysTotal(s);
+      return;
+    }
+    final m = _sysReviewMsg(s);
+    if (m == null) return;
+    s.reviewedMsg = m;
+    saveSysFix(s);
+    _saveClosing(force: true);
+    setState(() {});
+  }
+
+  // مجموع الباتشات المحسوبة لماكينة معينة (null لو مفيش)
+  double? _batchTotalFor(int? n) {
+    if (n == null) return null;
+    var t = 0.0;
+    var any = false;
+    for (final x in processedItems) {
+      if (x.counts && x.amount > 0 && x.orderNum == n) {
+        t += x.amount;
+        any = true;
+      }
+    }
+    return any ? round2(t) : null;
+  }
+
+  int? _batchTxnFor(int? n) {
+    if (n == null) return null;
+    var t = 0;
+    var any = false;
+    for (final x in processedItems) {
+      if (!x.counts || x.orderNum != n) continue;
+      if (x.txn == null) return null;
+      t += x.txn!;
+      any = true;
+    }
+    return any ? t : null;
+  }
+
+  // مشكلة رقمية لسه موجودة: فرق مبلغ عن الباتش، أو عدد معاملات مختلف، أو أعداد متناقضة
+  bool _sysNumIssue(SysTotal s) {
+    if (s.manualTotal == null && s.txnAll != null && s.txn == null) return true;
+    final n = s.tid != null ? terminals[s.tid]?.orderNum : null;
+    final bt = _batchTotalFor(n);
+    if (bt != null && s.amount != null && round2(bt - s.amount!) != 0) {
+      return true;
+    }
+    final cnt = sysCountOf(s), bx = _batchTxnFor(n);
+    return cnt != null && bx != null && bx != cnt;
+  }
+
+  // محتاج انتباه في صفحة السيستم: مراجعة ماكينة/بيانات ناقصة أو مشكلة رقمية (✓ مبتخفيش الرقمية)
+  bool _sysAttention(SysTotal s) => _sysNeedsReview(s) || _sysNumIssue(s);
+
+  // ماكينات من غير صورة سيستم (من غير الاحتياطي والمتجاهل)
+  List<int> _missingSystem() {
+    final have = <int>{};
+    for (final s in sysReads) {
+      final n = s.tid != null ? terminals[s.tid]?.orderNum : null;
+      if (n != null) have.add(n);
+    }
+    final ign = loadIgnoredMachines();
+    return [
+      for (var i = 1; i <= machineCount; i++)
+        if (numToTid[i] != null &&
+            !(terminals[numToTid[i]]?.spare ?? true) &&
+            !have.contains(i) &&
+            !ign.contains(i))
+          i,
+    ];
+  }
+
+  Widget _sysPageCard(SysTotal s) {
+    final t = s.tid != null ? terminals[s.tid] : null;
+    final n = t?.orderNum;
+    final nm = t != null
+        ? machineLabel(t.orderNum, t.unitName)
+        : (s.tid != null ? 'ترمنل ${s.tid}' : s.file);
+    final bad = _sysAttention(s);
+    final numIssue = _sysNumIssue(s);
+    final imgPath = _sysImagePath(s);
+    final cnt = sysCountOf(s);
+    final bt = _batchTotalFor(n);
+    final bx = _batchTxnFor(n);
+    final cs = Theme.of(context).colorScheme;
+    Widget? matchLine;
+    if (s.amount != null && n != null) {
+      if (bt == null) {
+        matchLine = _flagChip(context, 'مفيش باتش للمقارنة', kReviewTone);
+      } else {
+        final d = round2(bt - s.amount!);
+        matchLine = d == 0
+            ? _flagChip(context, 'الباتش: ${_fmtMoney(bt)} ✓ مطابق', Colors.green)
+            : _flagChip(
+                context,
+                'الباتش: ${_fmtMoney(bt)} | الباتش ${d > 0 ? 'أكبر' : 'أقل'} من السيستم بـ ${_fmtMoney(d.abs())} ج.م',
+                Colors.red,
+              );
+      }
+    }
+    final txnNote = (cnt != null && bx != null && bx != cnt)
+        ? _flagChip(context, 'معاملات الباتش $bx والسيستم $cnt', Colors.red)
+        : null;
+    final reviewMsg = _sysReviewMsg(s);
+    final card = Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: numIssue
+              ? _tintBorder(context, Colors.red)
+              : (bad ? kReviewTone : cs.outlineVariant),
+          width: bad ? 1.5 : 1.0,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        onTap: () => editSysTotal(s),
+        leading: GestureDetector(
+          onTap: imgPath != null ? () => _openSysImage(context, imgPath) : null,
+          child: imgPath != null
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(
+                    File(imgPath),
+                    width: 48,
+                    height: 48,
+                    cacheWidth: 144,
+                    fit: BoxFit.cover,
+                  ),
+                )
+              : const Icon(Icons.desktop_windows_outlined, size: 32),
+        ),
+        title: w.Text(nm, style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            w.Text(
+              s.amount != null
+                  ? '${_fmtMoney(s.amount!)} ج.م'
+                  : '⚠️ المبلغ غير مقروء',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            w.Text(
+              'TID: ${s.tid ?? 'غير مقروء'} | المعاملات: ${cnt ?? 'غير محسوبة'}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (matchLine != null)
+              Padding(padding: const EdgeInsets.only(top: 3), child: matchLine),
+            if (txnNote != null)
+              Padding(padding: const EdgeInsets.only(top: 3), child: txnNote),
+            if (reviewMsg != null)
+              w.Text(
+                '⚠️ $reviewMsg${s.reviewedMsg == reviewMsg ? ' (اتراجع ✓)' : ''}',
+                style: const TextStyle(fontSize: 12),
+              ),
+          ],
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              !bad
+                  ? Icons.check_circle
+                  : (numIssue ? Icons.error_outline : Icons.warning_amber),
+              color: !bad
+                  ? _tone(context, Colors.green)
+                  : (numIssue
+                        ? _tintBorder(context, Colors.red)
+                        : _tintBorder(context, kReviewTone)),
+            ),
+            PopupMenuButton<String>(
+              onSelected: (v) {
+                if (v == 'edit') editSysTotal(s);
+                if (v == 'open' && imgPath != null) _openSysImage(context, imgPath);
+                if (v == 'share' && imgPath != null) {
+                  Share.shareXFiles([XFile(imgPath)], text: nm);
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'edit', child: w.Text('تعديل')),
+                if (imgPath != null)
+                  const PopupMenuItem(value: 'open', child: w.Text('فتح الصورة')),
+                if (imgPath != null)
+                  const PopupMenuItem(value: 'share', child: w.Text('إرسال الصورة')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    return Dismissible(
+      key: ObjectKey(s),
+      direction: DismissDirection.horizontal,
+      confirmDismiss: (dir) async {
+        HapticFeedback.lightImpact();
+        // بعد ما السحب يخلص (مش جوه الـ Dismissible) علشان إعادة البناء متحصلش في نص الحركة
+        Future<void>.delayed(const Duration(milliseconds: 220), () {
+          if (!mounted) return;
+          if (dir == DismissDirection.startToEnd) {
+            _sysConfirm(s);
+          } else {
+            editSysTotal(s); // ✗ بيفتح التعديل: مفيش استبعاد لصورة سيستم
+          }
+        });
+        return false;
+      },
+      background: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        color: _tintBg(context, Colors.green, strong: true),
+        alignment: AlignmentDirectional.centerStart,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: const w.Text('راجعته ✓', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      secondaryBackground: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        color: _tintBg(context, Colors.red, strong: true),
+        alignment: AlignmentDirectional.centerEnd,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: const w.Text('تعديل ✗', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      child: card,
+    );
+  }
+
+  Widget _sysPageBody(_SystemPhotosPageState st) {
+    final all = List<SysTotal>.from(sysReads);
+    final reviewCnt = all.where(_sysAttention).length;
+    var vis = all.where((s) => !st.reviewOnly || _sysAttention(s)).toList();
+    final q = st.q.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      vis = vis.where((s) {
+        final t = s.tid != null ? terminals[s.tid] : null;
+        final label = t != null ? machineLabel(t.orderNum, t.unitName) : '';
+        return '$label ${s.tid ?? ''} ${s.file} ${s.amount ?? ''}'
+            .toLowerCase()
+            .contains(q);
+      }).toList();
+    }
+    int numOf(SysTotal s) =>
+        (s.tid != null ? terminals[s.tid]?.orderNum : null) ?? 9999;
+    if (st.sort == 1) {
+      vis.sort((a, b) => numOf(a).compareTo(numOf(b)));
+    } else if (st.sort == 2) {
+      vis.sort(
+        (a, b) => (_sysAttention(b) ? 1 : 0).compareTo(_sysAttention(a) ? 1 : 0),
+      );
+    } else if (st.sort == 3) {
+      vis.sort((a, b) => (b.amount ?? 0).compareTo(a.amount ?? 0));
+    }
+    final miss = _missingSystem();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      children: [
+        _filterRowCompact(
+          st.reviewOnly,
+          all.length,
+          reviewCnt,
+          (v) => st.setState(() => st.reviewOnly = v),
+        ),
+        _listTools(
+          context,
+          remaining: reviewCnt,
+          total: all.length,
+          controller: st.searchCtl,
+          onQuery: (v) => st.setState(() => st.q = v),
+          sort: st.sort,
+          sortLabels: const [
+            'الترتيب الأصلي',
+            'رقم الماكينة',
+            'المراجعة أولاً',
+            'المبلغ الأكبر',
+          ],
+          onSort: (v) => st.setState(() => st.sort = v),
+        ),
+        _sysStripRow(
+          miss.isEmpty
+              ? const SizedBox.shrink()
+              : Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: _flagChip(
+                        context,
+                        '⚠️ ماكينات من غير صورة سيستم (${miss.length}): '
+                        '${miss.map((n) {
+                          final t = numToTid[n] != null ? terminals[numToTid[n]] : null;
+                          return t != null ? '$n ${t.unitName}' : '$n';
+                        }).join(' ، ')}',
+                        kReviewTone,
+                      ),
+                    ),
+          true,
+        ),
+        const SizedBox(height: 10),
+        if (all.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: w.Text('مفيش صور سيستم لسه. اضغط "فحص التقفيل".')),
+          )
+        else if (vis.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: w.Text('مفيش نتايج.')),
+          ),
+        for (final s in vis) _sysPageCard(s),
+      ],
+    );
+  }
+
   Widget _alertStrip() {
     final nm = missingTerminals.length, nw = warnings.length;
     if (nm == 0 && nw == 0) return const SizedBox.shrink();
@@ -11984,7 +12388,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               );
             }
           }
-          if (sy0.txn != null && r.orderNum != null) {
+          if (sysCountOf(sy0) != null && r.orderNum != null) {
             var tx = 0;
             var txOk = true;
             for (final x in processedItems) {
@@ -11995,8 +12399,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               }
               tx += x.txn!;
             }
-            if (txOk && tx != sy0.txn) {
-              flags.add('معاملات الباتش $tx والسيستم ${sy0.txn}');
+            if (txOk && tx != sysCountOf(sy0)) {
+              flags.add('معاملات الباتش $tx والسيستم ${sysCountOf(sy0)}');
             }
           }
         }
@@ -13312,7 +13716,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               onSort: (v) => setState(() => _sort = v),
             ),
           ],
-          _alertStrip(),
+          _sysStripRow(_alertStrip(), false),
           const SizedBox(height: 10),
           if (processedItems.isEmpty && busy) const _SkeletonList(),
           if (processedItems.isEmpty && !busy)
@@ -14003,11 +14407,14 @@ class _SysReviewPageState extends State<SysReviewPage> {
         : '',
   );
   late List<double> cands = List<double>.from(widget.sys.cands);
+  late final String cnt0 = sysCountOf(widget.sys)?.toString() ?? ''; // متناقض = فاضي لحد ما تكتبه بنفسك
+  late final TextEditingController cntCtl = TextEditingController(text: cnt0);
   bool reading = false;
 
   @override
   void dispose() {
     amtCtl.dispose();
+    cntCtl.dispose();
     super.dispose();
   }
 
@@ -14166,13 +14573,20 @@ class _SysReviewPageState extends State<SysReviewPage> {
     widget.sys.amount = round2(v);
     widget.sys.cands = cands;
     widget.sys.manual = true;
+    final ct = cntCtl.text.trim();
+    if (ct != cnt0) {
+      // إجمالي العمليات اتعدل يدوي (فاضي = يرجع للقراءة التلقائية)
+      widget.sys.manualTotal = ct.isEmpty ? null : int.tryParse(ct);
+    }
     saveSysFix(widget.sys);
     if (close) Navigator.pop(context, true);
   }
 
   Future<void> _leaveSystem() async {
     final amount = double.tryParse(amtCtl.text.replaceAll(',', '').trim());
-    if (tid != widget.sys.tid || amount != widget.sys.amount) {
+    if (tid != widget.sys.tid ||
+        amount != widget.sys.amount ||
+        cntCtl.text.trim() != cnt0) {
       final answer = await showDialog<int>(
         context: context,
         builder: (c) => AlertDialog(
@@ -14310,6 +14724,16 @@ class _SysReviewPageState extends State<SysReviewPage> {
                       decoration: const InputDecoration(
                         labelText: 'إجمالي مبالغ السيستم (ج.م)',
                         isDense: true,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: cntCtl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'إجمالي العمليات',
+                        isDense: true,
+                        helperText: 'الرقم اللي فوق في صورة السيستم',
                       ),
                     ),
                     if (cands.isNotEmpty) ...[
@@ -17092,8 +17516,23 @@ void saveMOut(String? f) {
 }
 
 // عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
-bool _sysNeedsReview(SysTotal s) =>
-    s.tid == null || s.amount == null || s.review != null;
+// عدد العمليات الإجمالي من أعلى صورة السيستم (إلكتروني + يدوي + ملغي). null لو العدد متناقض/مش مقروء
+int? sysCountOf(SysTotal s) =>
+    s.manualTotal ?? (s.txn == null ? null : (s.txnAll ?? s.txn));
+
+// سبب المراجعة: سبب الماكينة، أو تناقض أعداد صورة السيستم (الإجمالي مش مطابق للتفاصيل)
+String? _sysReviewMsg(SysTotal s) =>
+    s.review ??
+    ((s.manualTotal == null && s.txnAll != null && s.txn == null)
+        ? 'أعداد السيستم متناقضة: راجع إجمالي العمليات'
+        : null);
+
+bool _sysNeedsReview(SysTotal s) {
+  if (s.tid == null || s.amount == null) return true;
+  // أعداد متناقضة = مشكلة رقمية: علامة "راجعته" مبتشيلهاش
+  if (s.manualTotal == null && s.txnAll != null && s.txn == null) return true;
+  return s.review != null && s.review != s.reviewedMsg;
+}
 
 // مبلغ الباتش لكل ترمنل (نفس قواعد batchAmtByNum: أي باتش مش مؤكد للماكينة بيلغي مبلغها)
 Map<String, double> batchAmtByTidOf(List<ReceiptItem> items) {
